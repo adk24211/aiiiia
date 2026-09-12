@@ -1,0 +1,28 @@
+[package]
+name = "saturn"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "A zero-dependency equality saturation engine: e-graphs, rewrite rules, cost extraction, symbolic differentiation, and an optimizing bytecode compiler."
+license = "MIT"
+readme = "README.md"
+keywords = ["egraph", "equality-saturation", "optimizer", "compiler", "symbolic"]
+categories = ["compilers", "mathematics"]
+
+[lib]
+name = "saturn"
+path = "src/lib.rs"
+
+[[bin]]
+name = "saturn"
+path = "src/bin/saturn.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+opt-level = 3
