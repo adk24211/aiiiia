@@ -190,6 +190,14 @@ side condition simply does not fire.
 reassociation, distribution, `ln(exp(x)) => x`. They are the same trade a C
 compiler makes under `-ffast-math`, and nothing enables them unless you ask.
 
+Every safe rule is tested as a claim, not just as part of a system. Rules with
+no side condition are evaluated against their own right-hand side over
+thousands of hostile inputs at tolerance zero. Conditional rules are built in a
+real e-graph and the analysis is asked the same question the rule asks —
+the identity is then checked exactly where the rule would fire, which is the
+only place it has to hold. All 102 are covered, and the test reports what it
+could not reach rather than letting a green tick imply coverage.
+
 `saturn fuzz` is how this stays honest rather than aspirational. It generates
 random expressions, optimizes them, and compares against the original over
 inputs including subnormals, infinities, and magnitudes spanning eighty orders
@@ -306,13 +314,34 @@ operation for a cheap one, and neither is smaller.
 
 ## Library
 
+One call for the whole pipeline:
+
 ```rust
-use saturn::{parse, rules, Runner, Extractor, OpCost};
+use saturn::{optimize, parse, rules, OpCost};
 
 let expr = parse("u / w + v / w")?;
-let runner = Runner::default().with_expr(&expr).run(&rules::safe());
-let (cost, best) = Extractor::new(&runner.egraph, OpCost).find_best(runner.root());
-println!("{}  (cost {})", best.pretty(), cost);
+let (best, runner) = optimize(&expr, &rules::all_rules(), OpCost);
+println!("{}", best.pretty());              // (u + v) / w
+println!("{}", runner.report());            // what stopped it, and which rules fired
+```
+
+Or drive the pieces yourself, which is what you want as soon as you care about
+limits, a second cost model, or the e-graph itself:
+
+```rust
+use saturn::{parse, rules, Runner, Extractor, AstSize, OpCost};
+use std::time::Duration;
+
+let expr = parse("u / w + v / w")?;
+let runner = Runner::default()
+    .with_expr(&expr)
+    .with_node_limit(50_000)
+    .with_time_limit(Duration::from_secs(1))
+    .run(&rules::all_rules());
+
+// One saturation, as many answers as you have cost models.
+let (_, fastest)  = Extractor::new(&runner.egraph, OpCost).find_best(runner.root());
+let (_, smallest) = Extractor::new(&runner.egraph, AstSize).find_best(runner.root());
 ```
 
 Writing rules:
