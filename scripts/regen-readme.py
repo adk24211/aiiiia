@@ -24,10 +24,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 DEMOS = {
-    "opt": ["opt", "u / w + v / w", "--stats"],
+    "opt": ["opt", "a*x^3 + b*x^2 + c*x + d", "--rules", "all", "--stats"],
+    "divide": ["opt", "u / w + v / w", "--rules", "all"],
     "diff": ["diff", "x", "exp(sin(x * x))"],
-    "vm": ["vm", "a*x^3 + b*x^2 + c*x + d"],
+    "vm": ["vm", "a*x^3 + b*x^2 + c*x + d", "--rules", "all"],
     "fuzz": ["fuzz", "--rules", "safe", "--count", "400", "--samples", "200"],
+    "rules": ["rules"],
     "bench": ["bench"],
 }
 

@@ -41,15 +41,75 @@ and a bytecode compiler for the result.
 
 ## What it does
 
+Here is a polynomial and 201 rules, none of which mentions Horner's rule:
+
 <!-- DEMO:opt -->
 
-Nothing in the rule library knows about that expression. The engine found the
-factoring because the e-graph held `u/w + v/w` and `(u+v)/w` simultaneously and
-the cost model priced a divide at fifteen adds.
+```console
+$ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --stats
+  input     a * x ^ 3 + b * x ^ 2 + x * c + d
+            15 nodes, 175.875 ops
+
+  optimized x * (c + x * (b + x * a)) + d
+            11 nodes, 15.625 ops  91% cheaper
+
+  e-graph   32 classes, 61 nodes, 6 iterations, 1.2ms (saturated)
+  rules     201 rules from `all`
+
+  stopped: saturated
+  iterations: 6
+  classes: 32
+  nodes: 61
+  total time: 1.21ms
+  rules that fired:
+        20  assoc-add
+         8  factor
+         6  assoc-mul
+         2  expand-pow
+         1  mul-pow
+
+  iteration    classes    nodes   matches   time
+          0         19       25         7   113.6µs
+          1         29       47        33   130.4µs
+          2         31       56        89   215.2µs
+          3         34       63       123   248.5µs
+          4         32       61       141   244.5µs
+          5         32       61       141   256.2µs
+```
+
+Every rule that fired is a one-line local identity. Horner's form is what falls
+out of keeping all of them and letting a cost model choose at the end; a
+conventional pass pipeline has to be *told* to look for it.
+
+A smaller one, for the mechanism:
+
+<!-- DEMO:divide -->
+
+```console
+$ saturn opt 'u / w + v / w' --rules all
+  input     u / w + v / w
+            6 nodes, 31.375 ops
+
+  optimized (u + v) / w
+            5 nodes, 16.375 ops  48% cheaper
+
+  e-graph   7 classes, 8 nodes, 2 iterations, 133.9µs (saturated)
+  rules     201 rules from `all`
+```
+
+Nothing in the rule library knows about that expression either. The engine
+found it because the e-graph held `u / w + v / w` and `(u + v) / w` at the same
+time, and the cost model prices a divide at fifteen adds.
 
 ### Differentiation is just more rules
 
 <!-- DEMO:diff -->
+
+```console
+$ saturn diff x 'exp(sin(x * x))'
+  f         exp(sin(x * x))
+  df/dx     exp(sin(x * x)) * (cos(x * x) * (x + x))
+```
 
 `d(x, e)` is an ordinary node with ordinary rules. A conventional symbolic
 differentiator emits a correct but grotesque expression and then runs a
@@ -62,14 +122,54 @@ once, and extraction picks the cheapest final answer out of all of them.
 
 <!-- DEMO:vm -->
 
-The extracted expression is already a maximally shared DAG, so
-common-subexpression elimination is not a pass — it is a consequence of how
-the expression is represented. Slots are recycled once a value is dead, so a
-long dependency chain needs a handful of them rather than one per node.
+```console
+$ saturn vm 'a*x^3 + b*x^2 + c*x + d' --rules all
+  params    p0=a p1=b p2=c p3=d p4=x
+  consts    (none)
+  11 instructions, 5 slots
+
+     0  s0   = p4            ; x
+     1  s1   = p2            ; c
+     2  s2   = p1            ; b
+     3  s3   = p0            ; a
+     4  s4   = *      s0, s3
+     5  s3   = +      s2, s4
+     6  s4   = *      s0, s3
+     7  s3   = +      s1, s4
+     8  s4   = *      s0, s3
+     9  s3   = p3            ; d
+    10  s0   = +      s4, s3
+
+  result in s0
+```
+
+That is the Horner form from above, compiled. The extracted expression is
+already a maximally shared DAG, so common-subexpression elimination is not a
+pass — it is a consequence of how the expression is represented. Slots are
+recycled once a value is dead, so eleven instructions need five slots rather
+than eleven.
 
 ### It checks itself
 
 <!-- DEMO:fuzz -->
+
+```console
+$ saturn fuzz --rules safe --count 400 --samples 200
+  fuzzing 400 expressions, depth 5, 102 rules from `safe`, tolerance 0
+
+  clean every optimized expression agreed with its input
+```
+
+Every one of those expressions was saturated, extracted, and then evaluated
+against its original over 200 inputs drawn from a distribution designed to
+break float code. At tolerance zero.
+
+```console
+$ saturn fuzz --rules safe --count 400 --samples 200
+  fuzzing 400 expressions, depth 5, 102 rules from `safe`, tolerance 0
+
+  clean every optimized expression agreed with its input
+```
 
 ---
 
@@ -136,7 +236,57 @@ binders out of the e-graph entirely.
 | `saturn repl` | interactive |
 
 Useful flags: `--rules <set>`, `--cost size|depth|ops`, `--iters`, `--nodes`,
-`--time`, `--stats`, `--shared`. `saturn --help` has the rest.
+`--time`, `--stats`, `--shared`. `saturn --help` has the rest. Setting
+`SATURN_TRACE=1` streams each phase to stderr as it happens.
+
+<!-- DEMO:rules -->
+
+```console
+$ saturn rules
+  rule sets
+  safe              102  every rule that preserves IEEE-754 results exactly
+  default           135  safe + differentiation (the default)
+  diff               33  symbolic differentiation only
+  arith              22  safe arithmetic identities
+  transcendental     17  safe exp/log/pow/sqrt/trig identities
+  logic              63  safe comparison, boolean, if, min/max/abs
+  fast-math          66  real-valued identities that change float results
+  all               201  default + fast-math
+  none                0  no rules; just parse, fold constants, and extract
+
+  list one with `saturn rules <name>`
+```
+
+<!-- DEMO:bench -->
+
+```console
+$ saturn bench
+  using 201 rules from `all`
+
+  name           nodes -> nodes     ops -> ops      classes    time
+  identity         7 -> 1           10 -> 0            839   318.5ms
+  factor           9 -> 7           14 -> 6             15   469.0µs
+  cancel           5 -> 3           20 -> 1            809    66.1ms
+  powers           5 -> 5          160 -> 16          1177   168.1ms
+  exp-fuse         8 -> 6          143 -> 47            14   370.0µs
+  log-ratio        5 -> 4           91 -> 60             8   210.4µs
+  trig             6 -> 1          129 -> 0              7   142.6µs
+  horner          15 -> 11         176 -> 16            32     1.2ms
+  divide           6 -> 5           31 -> 16             7   128.0µs
+  deriv            9 -> 8            - -> 8           1302   699.4ms
+  deriv-chain      5 -> 8            - -> 178          853   339.7ms
+  sqrt-square      7 -> 6           49 -> 26             8   175.7µs
+  boolean          8 -> 6            6 -> 4              8   149.9µs
+  big              7 -> 7           10 -> 10           557    54.4ms
+
+  overall 76% cheaper (derivatives excluded: they have no runtime cost to compare against)
+```
+
+Not every line improves, and that is the cost model doing its job.
+`ln(a) - ln(b)` becomes `ln(a / b)` because one logarithm beats two. `(x^2)^3`
+becomes a chain of multiplies because a `pow` call costs more than five of
+them. `(a + b + c)^3` is left exactly as written, because it already is the
+cheapest thing in its e-class -- and being told that is worth something too.
 
 ### Cost models
 
