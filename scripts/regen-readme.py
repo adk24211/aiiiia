@@ -27,6 +27,7 @@ DEMOS = {
     "opt": ["opt", "a*x^3 + b*x^2 + c*x + d", "--rules", "all", "--stats"],
     "divide": ["opt", "u / w + v / w", "--rules", "all"],
     "why": ["opt", "a*x^3 + b*x^2 + c*x + d", "--rules", "all", "--why"],
+    "assume": ["opt", "w / w * max(x, 0)", "--assume", "finite(w) && nonzero(w), x > 0"],
     "diff": ["diff", "x", "exp(sin(x * x))"],
     "vm": ["vm", "a*x^3 + b*x^2 + c*x + d", "--rules", "all"],
     "emit": ["emit", "a*x^3 + b*x^2 + c*x + d", "--rules", "all", "--name", "poly"],

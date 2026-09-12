@@ -10,6 +10,7 @@ cargo run -- opt 'a*x^3 + b*x^2 + c*x + d' --rules all
 cargo run -- diff x 'exp(sin(x * x))'
 cargo run -- emit 'u / w + v / w' --rules all --lang rust
 cargo run -- why 'x*y + x*z' 'x*(y + z)' --rules all
+cargo run -- opt 'w / w * x' --assume 'finite(w) && nonzero(w)'
 cargo run -- fuzz --rules safe --count 5000
 ```
 
@@ -58,13 +59,13 @@ $ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --stats
             11 nodes, 15.625 ops  91% cheaper
 
   e-graph   32 classes, 61 nodes, 6 iterations, 1.1ms (saturated)
-  rules     201 rules from `all`
+  rules     211 rules from `all`
 
   stopped: saturated
   iterations: 6
   classes: 32
   nodes: 61
-  total time: 1.09ms
+  total time: 1.13ms
   rules that fired:
         20  assoc-add
          8  factor
@@ -73,12 +74,12 @@ $ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --stats
          1  mul-pow
 
   iteration    classes    nodes   matches   time
-          0         19       25         7   109.7µs
-          1         29       47        33   129.4µs
-          2         31       56        89   225.1µs
-          3         34       63       123   210.8µs
-          4         32       61       141   216.4µs
-          5         32       61       141   196.8µs
+          0         19       25         7   133.3µs
+          1         29       47        33   138.9µs
+          2         31       56        89   194.2µs
+          3         34       63       123   238.0µs
+          4         32       61       141   226.5µs
+          5         32       61       141   200.0µs
 ```
 
 Every rule that fired is a one-line local identity. Horner's form is what falls
@@ -97,8 +98,8 @@ $ saturn opt 'u / w + v / w' --rules all
   optimized (u + v) / w
             5 nodes, 16.375 ops  48% cheaper
 
-  e-graph   7 classes, 8 nodes, 2 iterations, 139.9µs (saturated)
-  rules     201 rules from `all`
+  e-graph   7 classes, 8 nodes, 2 iterations, 130.8µs (saturated)
+  rules     211 rules from `all`
 ```
 
 Nothing in the rule library knows about that expression either. The engine
@@ -122,7 +123,7 @@ $ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --why
             11 nodes, 15.625 ops  91% cheaper
 
   e-graph   32 classes, 61 nodes, 6 iterations, 1.1ms (saturated)
-  rules     201 rules from `all`
+  rules     211 rules from `all`
 
   yes in 4 steps
   using congruence x3, assoc-mul
@@ -200,11 +201,11 @@ $ saturn time 'a*x^3 + b*x^2 + c*x + d' --rules all
   optimized x * (c + x * (b + x * a)) + d
 
                           ns/eval   speedup
-  interpreted                655.4   1.0x
-  compiled                    61.2   10.7x
-  compiled + optimized        24.1   27.2x
+  interpreted                708.0   1.0x
+  compiled                    63.3   11.2x
+  compiled + optimized        26.6   26.6x
 
-  program 15 -> 11 instructions, 5 -> 5 slots, 201 rules from `all`
+  program 15 -> 11 instructions, 5 -> 5 slots, 211 rules from `all`
 ```
 
 That is the Horner form from above, compiled. The extracted expression is
@@ -248,7 +249,7 @@ expressions over 24 hostile input rows against the reference interpreter,
 
 ```console
 $ saturn fuzz --rules safe --count 400 --samples 200
-  fuzzing 400 expressions, depth 5, 103 rules from `safe`, tolerance 0
+  fuzzing 400 expressions, depth 5, 113 rules from `safe`, tolerance 0
 
   clean every optimized expression agreed with its input
 ```
@@ -265,6 +266,33 @@ $ saturn fuzz --rules safe --count 400 --samples 200
 ```
 
 ---
+
+### It takes facts you give it
+
+The analysis can only prove what the expression implies, which for a bare
+variable is nothing: `w / w` never cancels, because `w` might be zero,
+infinite or NaN. Say otherwise and eleven guarded rules come unstuck at once:
+
+<!-- DEMO:assume -->
+
+```console
+$ saturn opt 'w / w * max(x, 0)' --assume 'finite(w) && nonzero(w), x > 0'
+  input     w / w * max(x, 0)
+            6 nodes, 20.375 ops
+
+  optimized x
+            1 nodes, 0.125 ops  99% cheaper
+
+  e-graph   4 classes, 7 nodes, 3 iterations, 122.2µs (saturated)
+  rules     146 rules from `default`
+```
+
+Constraints are ranges (`x > 0`, `-1 <= t, t <= 1`, `x == 3`) plus two
+predicates a range cannot express — `finite(x)` bounds a value without saying
+where, and `nonzero(x)` is a hole in the middle of a range rather than a range.
+
+Assumptions are taken on trust. A false one makes the result wrong in exactly
+the way a fast-math rule would, which is why you have to ask for them.
 
 ## Floating point is not algebra
 
@@ -339,8 +367,8 @@ binders out of the e-graph entirely.
 | `saturn bench` | run the built-in suite and report the savings |
 | `saturn repl` | interactive |
 
-Useful flags: `--rules <set>`, `--cost size|depth|ops`, `--iters`, `--nodes`,
-`--time`, `--stats`, `--shared`. `saturn --help` has the rest. Setting
+Useful flags: `--rules <set>`, `--assume '<facts>'`, `--cost size|depth|ops`,
+`--iters`, `--nodes`, `--time`, `--why`, `--stats`, `--shared`. `saturn --help` has the rest. Setting
 `SATURN_TRACE=1` streams each phase to stderr as it happens.
 
 <!-- DEMO:rules -->
@@ -348,14 +376,14 @@ Useful flags: `--rules <set>`, `--cost size|depth|ops`, `--iters`, `--nodes`,
 ```console
 $ saturn rules
   rule sets
-  safe              103  every rule that preserves IEEE-754 results exactly
-  default           136  safe + differentiation (the default)
+  safe              113  every rule that preserves IEEE-754 results exactly
+  default           146  safe + differentiation (the default)
   diff               33  symbolic differentiation only
   arith              23  safe arithmetic identities
   transcendental     17  safe exp/log/pow/sqrt/trig identities
-  logic              63  safe comparison, boolean, if, min/max/abs
+  logic              73  safe comparison, boolean, if, min/max/abs
   fast-math          65  real-valued identities that change float results
-  all               201  default + fast-math
+  all               211  default + fast-math
   none                0  no rules; just parse, fold constants, and extract
 
   list one with `saturn rules <name>`
@@ -365,23 +393,23 @@ $ saturn rules
 
 ```console
 $ saturn bench
-  using 201 rules from `all`
+  using 211 rules from `all`
 
   name           nodes -> nodes     ops -> ops      classes    time
-  identity         7 -> 1           10 -> 0            839   304.7ms
-  factor           9 -> 7           14 -> 6             15   368.6µs
-  cancel           5 -> 3           20 -> 1            902   122.6ms
-  powers           5 -> 5          160 -> 16          1177   406.1ms
-  exp-fuse         8 -> 6          143 -> 47            14   294.8µs
-  log-ratio        5 -> 4           91 -> 60             8   144.9µs
-  trig             6 -> 1          129 -> 0              7   103.8µs
-  horner          15 -> 11         176 -> 16            32   921.9µs
-  divide           6 -> 5           31 -> 16             7    98.0µs
-  deriv            9 -> 8            - -> 8           1303   599.0ms
-  deriv-chain      5 -> 8            - -> 178          839   332.1ms
-  sqrt-square      7 -> 6           49 -> 26             8   167.4µs
-  boolean          8 -> 6            6 -> 4              8   102.4µs
-  big              7 -> 7           10 -> 10           557    41.8ms
+  identity         7 -> 1           10 -> 0            839   297.9ms
+  factor           9 -> 7           14 -> 6             15   388.5µs
+  cancel           5 -> 3           20 -> 1            902   117.1ms
+  powers           5 -> 5          160 -> 16          1177   406.9ms
+  exp-fuse         8 -> 6          143 -> 47            14   293.4µs
+  log-ratio        5 -> 4           91 -> 60             8   193.1µs
+  trig             6 -> 1          129 -> 0              7   106.2µs
+  horner          15 -> 11         176 -> 16            32   913.3µs
+  divide           6 -> 5           31 -> 16             7   102.5µs
+  deriv            9 -> 8            - -> 8           1303   543.0ms
+  deriv-chain      5 -> 8            - -> 178          839   361.5ms
+  sqrt-square      7 -> 6           49 -> 26             8   168.1µs
+  boolean          8 -> 6            6 -> 4              8   128.3µs
+  big              7 -> 7           10 -> 10           557    46.2ms
 
   overall 76% cheaper (derivatives excluded: they have no runtime cost to compare against)
 ```
@@ -487,6 +515,7 @@ impl Analysis for CountLeaves {
 | `src/egraph.rs` | hashcons, congruence, deferred rebuilding, invariant checks |
 | `src/interval.rs` | the interval abstract domain |
 | `src/analysis.rs` | the analysis trait; constant folding over intervals |
+| `src/assume.rs` | facts the caller supplies about the variables |
 | `src/pattern.rs` | patterns and e-matching |
 | `src/rewrite.rs` | rules, conditional and dynamic appliers, the `rw!` macro |
 | `src/runner.rs` | the saturation loop and the backoff scheduler |

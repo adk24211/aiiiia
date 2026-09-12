@@ -140,6 +140,30 @@ it is exactly right, and the interval is what discharges the guard. The analysis
 is a *fact provider* for the rules, and a rule that cannot prove its side
 condition simply does not fire.
 
+### Facts from outside
+
+An analysis that can only see the expression proves very little about a bare
+variable, and `?x / ?x => 1` is stuck for good. `src/assume.rs` lets the caller
+supply what they know — `x > 0`, `finite(w)`, `nonzero(w)` — and the rules that
+were waiting on a proof come unstuck.
+
+Two details are load-bearing.
+
+Assumptions live in the analysis, not in the class. Writing a tighter interval
+into an e-class once would be erased the first time anything below it changed,
+because the analysis recomputes a class from its nodes. A variable's fact has
+to be part of what the variable *means*, which is `Analysis::make` for
+`Op::Var`.
+
+`nonzero` is a separate bit on the interval rather than a range. "Anything but
+zero" is a hole in the middle of an interval, and this domain has no holes. It
+propagates through exactly the operations that cannot turn a non-zero into a
+zero — negation, absolute value, square root, sign — and not through
+multiplication, because two non-zero values can underflow to zero.
+
+Assumptions are taken on trust, and the docs say so: a false one makes the
+result wrong in exactly the way a fast-math rule would.
+
 ## Patterns and e-matching
 
 A pattern is an expression with variables (`?x`). Matching it against an
