@@ -242,3 +242,29 @@ fn commutative_arguments_are_stored_in_a_canonical_order() {
         assert!(!eg.equivalent(l, r), "`{}` and `{}` were conflated", left, right);
     }
 }
+
+#[test]
+fn signed_zero_is_preserved() {
+    use saturn::analysis::MathAnalysis;
+    use saturn::egraph::EGraph;
+
+    // `-0.0` and `0.0` compare equal but are not interchangeable: `1 / -0.0`
+    // is `-inf` and `1 / 0.0` is `+inf`. They must not hashcons together.
+    let mut eg: EGraph<MathAnalysis> = EGraph::default();
+    let pos = eg.add_expr(&parse("1 / 0").unwrap());
+    let neg = eg.add_expr(&parse("1 / -0").unwrap());
+    eg.rebuild();
+    eg.check_invariants();
+    assert!(!eg.equivalent(pos, neg), "signed zeros were conflated");
+
+    // And the printer must not lose the sign.
+    let e = parse("-0").unwrap();
+    assert_eq!(e.pretty(), "-0");
+    assert_eq!(parse(&e.pretty()).unwrap().to_sexp(), e.to_sexp());
+    assert!(parse("-0")
+        .unwrap()
+        .node(parse("-0").unwrap().root())
+        .as_const()
+        .unwrap()
+        .is_sign_negative());
+}

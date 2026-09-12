@@ -89,12 +89,15 @@ impl fmt::Debug for Sym {
 
 /// A hashable, totally-ordered `f64` wrapper.
 ///
-/// Two normalizations make this sound as a hash key:
-/// * every NaN maps to one canonical NaN, and
-/// * `-0.0` maps to `0.0`,
+/// Equality is on the bit pattern, with one normalization: every NaN maps to a
+/// single canonical NaN, because `Eq` demands reflexivity and IEEE-754 forbids
+/// it. Nothing in the language can observe a NaN's sign or payload, so that
+/// collapse is invisible.
 ///
-/// so `F::eq` agrees with `f64`'s `==` on every value except NaN, where it is
-/// reflexive (which `Eq` requires and IEEE-754 forbids).
+/// `-0.0` is deliberately *not* collapsed into `0.0`, even though they compare
+/// equal. They are distinguishable: `1 / -0.0` is `-inf` while `1 / 0.0` is
+/// `+inf`, and `atan2` sees the difference too. Hashconsing them together
+/// would let the e-graph silently substitute one for the other.
 #[derive(Clone, Copy)]
 pub struct F(f64);
 
@@ -106,7 +109,7 @@ impl F {
         F(x)
     }
 
-    /// The underlying float, with NaN canonicalized and `-0.0` flushed to `0.0`.
+    /// The wrapped value, exactly as it was given.
     #[inline]
     pub fn get(self) -> f64 {
         self.0
@@ -116,11 +119,15 @@ impl F {
     fn bits(self) -> u64 {
         if self.0.is_nan() {
             CANON_NAN
-        } else if self.0 == 0.0 {
-            0
         } else {
             self.0.to_bits()
         }
+    }
+
+    /// True for `-0.0`, which prints and matches differently from `0.0`.
+    #[inline]
+    pub fn is_negative_zero(self) -> bool {
+        self.0 == 0.0 && self.0.is_sign_negative()
     }
 
     /// Total order key: maps IEEE bits to a `u64` whose unsigned order matches
@@ -178,6 +185,10 @@ impl fmt::Display for F {
             f.write_str("NaN")
         } else if x.is_infinite() {
             f.write_str(if x > 0.0 { "inf" } else { "-inf" })
+        } else if x == 0.0 && x.is_sign_negative() {
+            // Printing `0` here would lose the sign, and `-0.0` is a different
+            // value: reparsing must give back what was printed.
+            f.write_str("-0")
         } else if x == x.trunc() && x.abs() < 1e15 {
             // Print integral values without a trailing ".0" so that rules and
             // golden output read naturally: `2` rather than `2.0`.
