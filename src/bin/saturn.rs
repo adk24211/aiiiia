@@ -67,6 +67,22 @@ impl Style {
 // Argument parsing
 // ---------------------------------------------------------------------------
 
+/// Levenshtein distance, for suggesting the flag someone meant.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
 struct Args {
     command: String,
     positional: Vec<String>,
@@ -78,9 +94,11 @@ impl Args {
         let mut positional = Vec::new();
         let mut flags = Vec::new();
         let mut it = argv.into_iter().peekable();
-        // Flags that consume the following argument when it is not glued on
-        // with `=`.
-        const TAKES_VALUE: &[&str] = &[
+        // Every flag the CLI accepts. An unrecognized one is an error rather
+        // than a positional argument: `--calls 2000` silently appending
+        // `2000` to the expression being optimized is the kind of bug a user
+        // has no way to diagnose.
+        const VALUE_FLAGS: &[&str] = &[
             "rules",
             "cost",
             "iters",
@@ -97,13 +115,43 @@ impl Args {
             "depth",
             "max-failures",
             "set",
+            "calls",
         ];
+        const BOOL_FLAGS: &[&str] = &[
+            "help", "version", "stats", "shared", "sexp", "dot", "raw", "wild", "tame", "opt",
+            "quick", "arith", "logic",
+        ];
+        let known = |name: &str| VALUE_FLAGS.contains(&name) || BOOL_FLAGS.contains(&name);
+        let unknown = |name: &str| {
+            let mut all: Vec<&str> = VALUE_FLAGS.iter().chain(BOOL_FLAGS).copied().collect();
+            all.sort();
+            match all
+                .iter()
+                .map(|k| (edit_distance(name, k), *k))
+                // A suggestion is only useful when it is close; offering the
+                // whole flag list is the same as offering nothing.
+                .filter(|(d, k)| *d * 3 <= k.len().max(name.len()))
+                .min()
+            {
+                Some((_, k)) => format!("unknown flag `--{}`; did you mean `--{}`?", name, k),
+                None => format!("unknown flag `--{}`; run `saturn --help`", name),
+            }
+        };
+
         while let Some(a) = it.next() {
             if let Some(rest) = a.strip_prefix("--") {
                 match rest.split_once('=') {
-                    Some((k, v)) => flags.push((k.to_string(), Some(v.to_string()))),
+                    Some((k, v)) => {
+                        if !known(k) {
+                            return Err(unknown(k));
+                        }
+                        flags.push((k.to_string(), Some(v.to_string())));
+                    }
                     None => {
-                        if TAKES_VALUE.contains(&rest) {
+                        if !known(rest) {
+                            return Err(unknown(rest));
+                        }
+                        if VALUE_FLAGS.contains(&rest) {
                             let v = it
                                 .next()
                                 .ok_or_else(|| format!("`--{}` needs a value", rest))?;
