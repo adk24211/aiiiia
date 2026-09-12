@@ -24,7 +24,20 @@
 //! Every rule here is exact over the reals. The piecewise operators — `abs`,
 //! `min`, `max`, `sign`, `floor`, `ceil`, `if`, and the comparisons — are
 //! differentiated *almost everywhere*: the identities hold off the measure-zero
-//! set of kinks and jumps, where no derivative exists to be right about.
+//! set of kinks and jumps, where no derivative exists to be right about. The
+//! same goes for arguments outside a function's domain: `ln(?a)` and
+//! `sqrt(?a)` are NaN on a whole neighbourhood of a negative `?a`, so whatever
+//! the identity evaluates to there — finite for `ln`, NaN for `sqrt` — is an
+//! answer to a question that was not asked.
+//!
+//! Over floats there is one further qualification. A derivative is assembled
+//! out of the *values* of the body's subexpressions, so a non-finite value can
+//! turn a term that contributes nothing into NaN: the product rule's `0 * ?b`
+//! is NaN at `?b = inf`, where `diff-independent` would have said 0. Both
+//! forms end up in one e-class and the extractor picks whichever is cheaper.
+//! What makes that tolerable is that the body has no derivative at such a
+//! point either way; wherever the values a rule is built from are finite, the
+//! forms it can produce agree.
 //!
 //! One of the rules is not really a pattern. `d(x, e) => 0` has to know
 //! whether `e` can vary with `x`, which no left-hand side can ask; the
@@ -170,8 +183,15 @@ fn depends_on(body: &str, var: &str) -> Cond {
     })
 }
 
-/// `?v` is not the literal zero.
-fn not_literal_zero(v: &str) -> Cond {
+/// `?v` is not provably zero.
+///
+/// This is the analysis's constant rather than the syntax: a class the
+/// analysis has folded to zero is excluded however it happens to be spelled,
+/// and `-0.0` counts as zero because it compares equal to `0.0`. An exponent
+/// this rejects is one `diff-pow-const` must not touch, since `?g - 1` would
+/// then be `-1` and the rule would answer `0 * ?f ^ -1`, NaN at `?f = 0`,
+/// where `?f ^ ?g` is the constant 1 and the derivative is 0.
+fn not_provably_zero(v: &str) -> Cond {
     let sym = Sym::new(v);
     Box::new(move |egraph, _matched, subst| match subst.get(sym) {
         Some(id) => egraph[id].data.value() != Some(0.0),
@@ -217,11 +237,14 @@ pub fn safe() -> Vec<Rule> {
         // `?f ^ 0` is the constant function 1 for *every* `?f` — IEEE-754
         // makes even `0 ^ 0` and `nan ^ 0` equal 1 — so this case is split out
         // rather than left to the rule below, which would produce
-        // `0 * ?f ^ -1` and so NaN rather than 0 at `?f = 0`.
+        // `0 * ?f ^ -1` and so NaN rather than 0 at `?f = 0`. The literal in
+        // the pattern is enough to cover a folded zero as well: the analysis
+        // puts the constant it proves into the class alongside the expression
+        // that computed it, so `?f ^ (2 - 2)` matches here too.
         rw!("diff-pow-zero"; "d(?x, ?f ^ 0)" => "0"),
         rw!("diff-pow-const"; "d(?x, ?f ^ ?g)" => "?g * ?f ^ (?g - 1) * d(?x, ?f)",
-            if "?g is a nonzero exponent provably free of ?x",
-            and(independent_of("?g", "?x"), not_literal_zero("?g"))),
+            if "?g is an exponent provably free of ?x and not provably zero",
+            and(independent_of("?g", "?x"), not_provably_zero("?g"))),
         // The logarithmic form is the only one that handles a varying
         // exponent, and it is confined to that case. For `?f < 0` it yields
         // NaN through `ln(?f)`, which is not a loss: with `?g` varying,
@@ -255,14 +278,31 @@ pub fn safe() -> Vec<Rule> {
         // the tie by a value symmetric in the two derivatives repairs it, and
         // the midpoint is the value differentiating
         // `min(a, b) = (a + b - abs(a - b)) / 2` gives under `sign(0) = 0`.
-        // Comparisons against NaN are all false, so a NaN argument also lands
-        // on the symmetric branch and the two instantiations still agree.
+        //
+        // NaN is the other case the comparisons cannot order, and it is not a
+        // tie: `min` and `max` return whichever argument is *not* NaN, so with
+        // `?a` NaN the result is `?b` on a whole neighbourhood and the
+        // derivative is `d(?x, ?b)`, not the midpoint. Every comparison
+        // against NaN being false, the ordered branches cannot tell that case
+        // from a tie and would halve the answer, so the two NaN tests separate
+        // it out — and keep the symmetry, since exchanging `?a` and `?b` swaps
+        // those branches pairwise. Both arguments NaN falls through to the
+        // midpoint again, where the result is NaN and there is no derivative
+        // to disagree with.
         rw!("diff-min"; "d(?x, min(?a, ?b))"
             => "if(?a < ?b, d(?x, ?a), \
-                   if(?b < ?a, d(?x, ?b), (d(?x, ?a) + d(?x, ?b)) / 2))"),
+                   if(?b < ?a, d(?x, ?b), \
+                      if(?a != ?a, \
+                         if(?b != ?b, (d(?x, ?a) + d(?x, ?b)) / 2, d(?x, ?b)), \
+                         if(?b != ?b, d(?x, ?a), \
+                            (d(?x, ?a) + d(?x, ?b)) / 2))))"),
         rw!("diff-max"; "d(?x, max(?a, ?b))"
             => "if(?a > ?b, d(?x, ?a), \
-                   if(?b > ?a, d(?x, ?b), (d(?x, ?a) + d(?x, ?b)) / 2))"),
+                   if(?b > ?a, d(?x, ?b), \
+                      if(?a != ?a, \
+                         if(?b != ?b, (d(?x, ?a) + d(?x, ?b)) / 2, d(?x, ?b)), \
+                         if(?b != ?b, d(?x, ?a), \
+                            (d(?x, ?a) + d(?x, ?b)) / 2))))"),
         // Sound wherever the condition is locally constant, which is
         // everywhere except the surface it switches on.
         rw!("diff-if"; "d(?x, if(?c, ?a, ?b))" => "if(?c, d(?x, ?a), d(?x, ?b))"),
@@ -430,6 +470,9 @@ mod tests {
             ("d(x, exp(x))", "exp(x)"),
             ("d(x, x ^ 3)", "3 * x ^ 2"),
             ("d(x, x ^ 0)", "0"),
+            // An exponent that is only zero once folded still avoids the
+            // power rule, whose `x ^ -1` is infinite at zero.
+            ("d(x, x ^ (2 - 2))", "0"),
             ("d(x, floor(x))", "0"),
             ("d(x, x > 1)", "0"),
         ] {
@@ -501,6 +544,27 @@ mod tests {
     }
 
     #[test]
+    fn min_and_max_follow_the_argument_that_is_not_nan() {
+        // `min(nan, x)` is `x` and `max(nan, x)` is `x`, so both are the
+        // identity on a whole neighbourhood of any `x` and differentiate to 1.
+        // A NaN argument is not a tie, and the midpoint would give 1/2.
+        for src in ["d(x, min(y, x))", "d(x, max(y, x))"] {
+            let got = derivative(src);
+            assert_no_diff(&got);
+            for x in [-2.0, 0.0, 3.0] {
+                assert_close(at(&got, &[("x", x), ("y", f64::NAN)]), 1.0);
+            }
+        }
+
+        // With both arguments NaN the value is NaN and there is no derivative
+        // to be right about; all that is required is that the rule commit to
+        // one answer rather than depend on the order of the arguments.
+        let both = derivative("d(x, min(y, x * y))");
+        assert_no_diff(&both);
+        assert!(at(&both, &[("x", 1.0), ("y", f64::NAN)]).is_nan());
+    }
+
+    #[test]
     fn a_nested_derivative_reduces_to_the_second_derivative() {
         let got = derivative("d(x, d(x, x * x))");
         assert_no_diff(&got);
@@ -553,6 +617,15 @@ mod tests {
         let got = derivative("d(x, x * y + y * y)");
         assert_no_diff(&got);
         assert_close(at(&got, &[("x", 4.0), ("y", 3.0)]), 3.0);
+
+        // An exponent that is symbolic but free of `x` takes the power rule,
+        // not the logarithmic one: `y * x ^ (y - 1)`, which is 12 here.
+        let got = derivative("d(x, x ^ y)");
+        assert_no_diff(&got);
+        assert_close(at(&got, &[("x", 2.0), ("y", 3.0)]), 12.0);
+        // The logarithmic form would be NaN at a negative base; the power
+        // rule is exact there.
+        assert_close(at(&got, &[("x", -2.0), ("y", 3.0)]), 12.0);
     }
 
     // -- interaction with the rest of the library ---------------------------

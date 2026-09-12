@@ -261,7 +261,7 @@ pub fn agree(x: f64, y: f64, tolerance: f64) -> bool {
     if x == y {
         return true;
     }
-    (x - y).abs() <= tolerance * scale(x, y)
+    relative_error(x, y) <= tolerance
 }
 
 /// The magnitude a difference is measured against.
@@ -285,7 +285,12 @@ pub fn relative_error(x: f64, y: f64) -> f64 {
     if x.is_nan() || y.is_nan() || x.is_infinite() || y.is_infinite() {
         return f64::INFINITY;
     }
-    (x - y).abs() / scale(x, y)
+    // Scale before subtracting. `f64::MAX - (-f64::MAX)` overflows to
+    // infinity, which would report two finite values as infinitely far apart
+    // and poison the worst-sample ranking; dividing first cannot overflow,
+    // because the scale is at least as large as either operand.
+    let s = scale(x, y);
+    (x / s - y / s).abs()
 }
 
 #[cfg(test)]
@@ -356,6 +361,28 @@ mod tests {
         assert!(agree(f64::NAN, f64::NAN, 0.0));
         assert!(!agree(f64::NAN, 0.0, 1e9));
         assert!(!agree(0.0, f64::NAN, 1e9));
+    }
+
+    #[test]
+    fn a_difference_that_overflows_is_still_measured() {
+        // `f64::MAX - (-f64::MAX)` is infinite, but the two values are only a
+        // factor of two apart. Reporting an infinite relative error would make
+        // the worst-sample ranking meaningless.
+        let e = relative_error(f64::MAX, -f64::MAX);
+        assert!(e.is_finite(), "relative error came out {}", e);
+        assert!((e - 2.0).abs() < 1e-12, "relative error came out {}", e);
+        assert!(!agree(f64::MAX, -f64::MAX, 1e-9));
+        assert!(agree(f64::MAX, -f64::MAX, 4.0));
+    }
+
+    #[test]
+    fn a_huge_tolerance_still_cannot_excuse_a_nan() {
+        // The tolerance scales a distance; it is not a licence to call two
+        // different kinds of answer the same.
+        assert!(!agree(f64::NAN, 1.0, f64::INFINITY));
+        assert!(!agree(f64::INFINITY, f64::MAX, f64::INFINITY));
+        assert!(!agree(f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY));
+        assert!(agree(f64::INFINITY, f64::INFINITY, 0.0));
     }
 
     #[test]

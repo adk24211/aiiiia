@@ -125,6 +125,9 @@ impl Interval {
     pub fn is_negative(&self) -> bool {
         !self.nan && self.hi < 0.0
     }
+    /// Provably `>= 0` and not NaN. Note that `-0.0 >= 0.0`, so this admits a
+    /// negative zero; a rule whose correctness turns on the sign of a zero
+    /// wants [`Interval::is_positive`].
     pub fn is_nonneg(&self) -> bool {
         !self.nan && self.lo >= 0.0
     }

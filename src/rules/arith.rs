@@ -28,22 +28,27 @@
 //! three times. So reassociation, distribution, factoring, and every rule that
 //! cancels a multiply against a divide live in [`fast_math`].
 //!
-//! # Two things this language cannot see
+//! # The one bit this language cannot carry
 //!
-//! **NaN is a single value here.** [`F`](crate::sym::F) maps every NaN to one
-//! canonical bit pattern and `Op::eval` produces `f64::NAN`, so no expression
-//! can observe a NaN's sign or payload. Rules that would differ only in which
-//! NaN comes back are therefore treated as exact.
+//! [`F`](crate::sym::F) compares and hashes floats by their bit pattern, with
+//! one collapse: every NaN maps to a single canonical pattern, because `Eq`
+//! demands reflexivity and IEEE-754 forbids it. So the e-graph cannot hold two
+//! distinct NaNs and no side condition can tell them apart.
 //!
-//! **Signed zero is a real distinction.** `-0.0` and `0.0` compare equal but
-//! are not interchangeable: `1 / -0.0` is `-inf`. The core keeps them as
-//! separate literals, so a `0` in a pattern matches only `+0.0`. What still
-//! needs care is a signed zero arriving through a *variable*: `?x + 0 => ?x`
-//! is wrong at `?x = -0.0`, because two zeros of opposite sign add to `+0.0`.
-//! That is why it is guarded and `?x - 0 => ?x`, which is exact at both
-//! zeros, is not.
-
-use super::{and, is_const, is_finite, is_finite_nonzero, is_nonzero, Rule};
+//! The arithmetic underneath is not so tidy. `Op::eval` hands back whatever
+//! NaN the hardware produced, and `-x` flips a NaN's sign bit where `x * -1`
+//! leaves it alone. *Exact* in this file therefore means exact up to the sign
+//! bit of a NaN result — a bit the sign-flip rules do change, and one that
+//! neither `F`, the printer, nor the differential checker reads.
+//!
+//! A zero's sign, by contrast, is carried faithfully. `-0.0` and `0.0` are
+//! distinct literals, distinct e-nodes, and distinct e-classes, because they
+//! are distinguishable: `1 / -0.0` is `-inf`. A `0` in a pattern matches only
+//! `+0.0`. What still needs care is a signed zero arriving through a
+//! *variable*, which is why `?x + 0 => ?x` is guarded — two zeros of opposite
+//! sign add to `+0.0` — while `?x - 0 => ?x`, exact at both zeros, is not.
+//!
+use super::{and, is_const, is_finite, is_finite_nonzero, is_nonzero, is_positive, Rule};
 use crate::analysis::MathAnalysis;
 use crate::egraph::EGraph;
 use crate::lang::{Id, Op};
@@ -60,8 +65,12 @@ use crate::{rw, rw_bi};
 /// the reassociation rules then have to chew through.
 const MAX_POW_EXPANSION: u32 = 8;
 
-/// Identities that reproduce the original expression's IEEE-754 result bit for
-/// bit, on every input, for every rule.
+/// Identities that reproduce the original expression's IEEE-754 result on
+/// every input, for every rule.
+///
+/// Bit for bit, with the one exception the module docs set out: the sign bit
+/// of a NaN, which the sign-flip rules may change and nothing downstream
+/// reads.
 pub fn safe() -> Vec<Rule> {
     let mut rules = vec![
         // `x + 0.0` returns `x` untouched for every x except `-0.0`, where
@@ -70,8 +79,17 @@ pub fn safe() -> Vec<Rule> {
         // that out.
         rw!("add-zero"; "?x + 0" => "?x", if "?x is nonzero", is_nonzero("?x")),
         // Subtraction needs no such guard: `x - 0.0` is `x + -0.0`, and
-        // `-0.0 + -0.0` is `-0.0`, so the identity holds at both zeros.
+        // `-0.0 + -0.0` is `-0.0`, so the identity holds at both zeros. The
+        // literal here is `+0.0` and only `+0.0`.
         rw!("sub-zero"; "?x - 0" => "?x"),
+        // `x * 0.0` is `+0.0` for every finite positive x, and something else
+        // for each of the cases the guard excludes: `-0.0` for a negative x,
+        // NaN for an infinity or a NaN.
+        rw!("mul-zero"; "?x * 0" => "0",
+            if "?x is finite and positive", and(is_finite("?x"), is_positive("?x"))),
+        // `0.0 / x` is `+0.0` whenever x is positive, infinities included.
+        // A negative x gives `-0.0`, and a zero gives NaN.
+        rw!("zero-div"; "0 / ?x" => "0", if "?x is positive", is_positive("?x")),
         // `0 - x` and `-x` disagree at `x = 0`: subtraction yields `+0.0`,
         // negation yields `-0.0`. Away from zero the subtraction is exact.
         rw!("zero-sub"; "0 - ?x" => "-?x", if "?x is nonzero", is_nonzero("?x")),
@@ -83,8 +101,6 @@ pub fn safe() -> Vec<Rule> {
         // the quotient's magnitude is the numerator's.
         rw!("div-neg-one"; "?x / -1" => "-?x"),
         rw!("neg-neg"; "-(-?x)" => "?x"),
-        // Two sign flips in a row, one of them the subtraction's own.
-        rw!("sub-neg"; "?a - -?b" => "?a + ?b"),
         // Cancellation is only zero when there is nothing to cancel to:
         // `inf - inf` and `NaN - NaN` are NaN. For finite x the difference is
         // exactly `+0.0`, even at `x = -0.0`.
@@ -104,7 +120,9 @@ pub fn safe() -> Vec<Rule> {
     rules.extend(rw_bi!("neg-mul-one"; "?x * -1" => "-?x"));
     // IEEE-754 defines `a - b` to be `a + (-b)`, and `-b` is exact, so these
     // agree on the nose — `inf - inf` gives NaN both ways, and every
-    // combination of signed zeros lands on the same zero.
+    // combination of signed zeros lands on the same zero. Run forwards and
+    // then through `neg-neg` it also settles `?a - -?b => ?a + ?b`, so there
+    // is no separate rule for that shape.
     rules.extend(rw_bi!("sub-to-add"; "?a - ?b" => "?a + -?b"));
     // The sign of a product or quotient is the exclusive-or of its operands'
     // signs and its magnitude does not depend on them, so a negation moves
@@ -127,8 +145,8 @@ pub fn fast_math() -> Vec<Rule> {
         // away.
         rw!("add-zero-lax"; "?x + 0" => "?x"),
         rw!("sub-zero-lax"; "?x - 0" => "?x"),
-        rw!("mul-zero"; "?x * 0" => "0"),
-        rw!("zero-div"; "0 / ?x" => "0"),
+        rw!("mul-zero-lax"; "?x * 0" => "0"),
+        rw!("zero-div-lax"; "0 / ?x" => "0"),
         rw!("sub-self-lax"; "?x - ?x" => "0"),
         rw!("div-self-lax"; "?x / ?x" => "1"),
         // Reassociation. One direction of each is enough: union is symmetric,
@@ -166,7 +184,9 @@ pub fn fast_math() -> Vec<Rule> {
         // `(a * b) / b` overflows to infinity for large `a * b`, is NaN at
         // `b = 0`, and rounds twice where `a` rounds not at all.
         rw!("mul-div-cancel"; "?a * ?b / ?b" => "?a"),
-        rw!("div-mul-cancel"; "?a / ?b * ?b" => "?a"),
+        // `?c` matches `?b` as happily as anything else, so this reaches
+        // `?a / ?b * ?b` and hands it to `mul-div-cancel`; the divide-first
+        // spelling needs no rule of its own.
         rw!("mul-over-div"; "?a / ?b * ?c" => "?a * ?c / ?b"),
         // Introducing a power. `pow` is not required to be correctly rounded,
         // so even `pow(x, 2)` may not be the correctly rounded square that
@@ -284,7 +304,43 @@ mod tests {
     }
 
     /// A range the interval analysis can pin down, so the guarded rules fire.
+    ///
+    /// `min`/`max` return the non-NaN operand, so this is in `[1, 3]` for
+    /// every double, NaN included — the guards are never merely *assumed*
+    /// here, they are provable.
     const BOUNDED: &str = "max(min(x, 3), 1)";
+
+    /// Every double a rule has to survive: both zeros, both infinities, a
+    /// NaN, the subnormal boundary, and a magnitude that overflows on
+    /// doubling.
+    const SPECIALS: [f64; 13] = [
+        -0.0,
+        0.0,
+        1.0,
+        -1.0,
+        2.0,
+        -3.5,
+        f64::MIN_POSITIVE,
+        5e-324,
+        1e308,
+        -1e308,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+    ];
+
+    /// Bit equality, counting every NaN as one value.
+    ///
+    /// That is the coarsest comparison the safe tier is allowed: a NaN's sign
+    /// bit is the only thing these rules may change (see the module docs), so
+    /// it is also the only thing this may forgive.
+    fn same_value(a: f64, b: f64) -> bool {
+        if a.is_nan() || b.is_nan() {
+            a.is_nan() && b.is_nan()
+        } else {
+            a.to_bits() == b.to_bits()
+        }
+    }
 
     #[test]
     fn every_rule_has_a_unique_name() {
@@ -296,11 +352,95 @@ mod tests {
                 rule.name
             );
         }
-        assert!(
-            seen.len() > 30,
-            "expected a thorough rule set, got {}",
-            seen.len()
-        );
+        // A `-lax` rule is the unguarded twin of a safe one. Keeping the stems
+        // in step is what makes the two tiers comparable at a glance, and a
+        // stem that no longer resolves means one side was renamed alone.
+        let guarded: HashSet<String> = safe().into_iter().map(|r| r.name).collect();
+        for rule in fast_math() {
+            if let Some(stem) = rule.name.strip_suffix("-lax") {
+                assert!(
+                    guarded.contains(stem),
+                    "`{}` has no guarded counterpart `{}`",
+                    rule.name,
+                    stem
+                );
+            }
+            assert!(
+                !guarded.contains(&rule.name),
+                "`{}` is in both tiers; loading `all` would hide one from the scheduler",
+                rule.name
+            );
+        }
+    }
+
+    /// The whole promise of [`safe`], on every rule at once.
+    ///
+    /// Saturating and re-extracting must not move a bit, so this evaluates
+    /// the original and the rewritten form side by side over [`SPECIALS`].
+    /// One expression per rule, and the guarded rules get a [`BOUNDED`]
+    /// argument so their side conditions actually discharge.
+    #[test]
+    fn safe_rules_are_exact_on_every_special_value() {
+        let safe = safe();
+        let mut sources: Vec<String> = [
+            "x * 1", "x / 1", "x / -1", "-(-x)", "x ^ 1", "2 * x", "x + x", "x * -1", "-x",
+            "x - y", "x + -y", "x - -y", "-(x * y)", "-x * y", "-(x / y)", "-x / y", "x / -y",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        sources.extend([
+            format!("{BOUNDED} + 0"),
+            format!("{BOUNDED} - 0"),
+            format!("0 - {BOUNDED}"),
+            format!("{BOUNDED} - {BOUNDED}"),
+            format!("{BOUNDED} / {BOUNDED}"),
+        ]);
+
+        for src in &sources {
+            let before = parse(src).expect("the test expression should parse");
+            let after = saturate(src, &safe);
+            for &x in SPECIALS.iter() {
+                for &y in SPECIALS.iter() {
+                    let env: Env = [(Sym::new("x"), x), (Sym::new("y"), y)]
+                        .into_iter()
+                        .collect();
+                    let want = eval(&before, &env).expect("eval");
+                    let got = eval(&after, &env).expect("eval");
+                    assert!(
+                        same_value(want, got),
+                        "`{}` became `{}`, which at x = {:e}, y = {:e} gives {:?} not {:?}",
+                        src,
+                        after.pretty(),
+                        x,
+                        y,
+                        got,
+                        want
+                    );
+                }
+            }
+        }
+    }
+
+    /// The guards in [`safe`] are load-bearing: dropping them really is wrong.
+    ///
+    /// Each case is an input where the fast-math twin of a guarded rule
+    /// changes the answer. A guard that made no difference at any input would
+    /// be a guard worth deleting.
+    ///
+    #[test]
+    fn the_guards_are_not_decoration() {
+        for (src, x) in [("x + 0", -0.0), ("x - x", f64::INFINITY), ("x / x", 0.0)] {
+            let env: Env = [(Sym::new("x"), x)].into_iter().collect();
+            let before = eval(&parse(src).expect("parse"), &env).expect("eval");
+            let after = eval(&saturate(src, &fast_math()), &env).expect("eval");
+            assert!(
+                !same_value(before, after),
+                "fast-math left `{}` alone at x = {:e}; the safe tier need not guard it",
+                src,
+                x
+            );
+        }
     }
 
     #[test]
@@ -310,6 +450,7 @@ mod tests {
         assert_eq!(simplify("-(-x)", &safe), "x");
         assert_eq!(simplify("x * -1", &safe), "-x");
         assert_eq!(simplify("x / -1", &safe), "-x");
+        // No rule spells this one out; `sub-to-add` and `neg-neg` compose.
         assert_eq!(simplify("x - -y", &safe), "x + y");
         // A negation costs the same wherever it sits, so which side of the
         // product it ends up on is a tie the extractor breaks arbitrarily.
@@ -322,23 +463,6 @@ mod tests {
     fn doubling_runs_both_ways() {
         // A multiply costs four adds, so the extractor prefers the sum.
         assert_eq!(simplify("2 * x", &safe()), "x + x");
-    }
-
-    #[test]
-    fn doubling_preserves_every_bit() {
-        let src = parse("2 * x").expect("parse");
-        let out = saturate("2 * x", &safe());
-        for v in [-0.0f64, 0.0, f64::INFINITY, f64::NEG_INFINITY, -3.5, 1e308] {
-            let env: Env = [(Sym::new("x"), v)].into_iter().collect();
-            let before = eval(&src, &env).expect("eval");
-            let after = eval(&out, &env).expect("eval");
-            assert_eq!(
-                before.to_bits(),
-                after.to_bits(),
-                "doubling changed the result at x = {}",
-                v
-            );
-        }
     }
 
     #[test]
@@ -365,12 +489,21 @@ mod tests {
             simplify(&format!("0 - {BOUNDED}"), &safe),
             format!("-{BOUNDED}")
         );
+
+        // Multiplying by zero and dividing zero are exact where the sign of
+        // the result is pinned, and held back everywhere else.
+        assert!(!proves_equal("x * 0", "0", &safe));
+        assert!(!proves_equal("0 / x", "0", &safe));
+        assert_eq!(simplify(&format!("{BOUNDED} * 0"), &safe), "0");
+        assert_eq!(simplify(&format!("0 / {BOUNDED}"), &safe), "0");
     }
 
+    /// The two zeros are distinguishable, so the core keeps them apart.
     #[test]
     fn the_two_zeros_stay_apart() {
-        // They compare equal but behave differently, and no rule here may
-        // merge them: `1 / 0.0` and `1 / -0.0` are opposite infinities.
+        // `1 / 0.0` is `+inf` and `1 / -0.0` is `-inf`, so conflating the
+        // literals would let the e-graph substitute one infinity for the
+        // other. No rule in this file may merge them either.
         let mut egraph: EGraph<MathAnalysis> = EGraph::new(MathAnalysis::default());
         let positive = egraph.add_constant(0.0);
         let negative = egraph.add_constant(-0.0);
@@ -396,6 +529,9 @@ mod tests {
         let fast = fast_math();
         assert_eq!(simplify("x * y + x * z", &fast), "x * (y + z)");
         assert_eq!(simplify("x * y / y", &fast), "x");
+        // The divide-first spelling has no rule; `mul-over-div` reorders it
+        // into one `mul-div-cancel` can finish.
+        assert_eq!(simplify("a / b * b", &fast), "a");
         assert_eq!(simplify("a / b / c", &fast), "a / (b * c)");
     }
 
@@ -444,8 +580,6 @@ mod tests {
 
     #[test]
     fn repeated_squaring_builds_the_shortest_chain() {
-        let mut egraph: EGraph<MathAnalysis> = EGraph::new(MathAnalysis::default());
-        let x = egraph.add_op(Op::Var(Sym::new("x")), Vec::new());
         for (k, multiplies) in [(2u32, 1usize), (3, 2), (4, 2), (5, 3), (8, 3)] {
             let mut fresh: EGraph<MathAnalysis> = EGraph::new(MathAnalysis::default());
             let base = fresh.add_op(Op::Var(Sym::new("x")), Vec::new());
@@ -459,8 +593,15 @@ mod tests {
                 .count();
             assert_eq!(muls, multiplies, "x ^ {} used {} multiplies", k, muls);
         }
-        // The chain reuses the base rather than adding a second copy of it.
+
+        // Both factors are the *same* e-class, not two copies of the base. An
+        // `x * x` built from two separate ids would cost the extractor twice
+        // and would never match `square`'s repeated `?x`.
+        let mut egraph: EGraph<MathAnalysis> = EGraph::new(MathAnalysis::default());
+        let x = egraph.add_op(Op::Var(Sym::new("x")), Vec::new());
         let squared = power_chain(&mut egraph, x, 2);
+        egraph.rebuild();
         assert_eq!(egraph[squared].nodes[0].children(), &[x, x]);
+        assert_eq!(egraph[squared].nodes[0].op, Op::Mul);
     }
 }

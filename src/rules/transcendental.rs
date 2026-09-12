@@ -42,16 +42,19 @@ pub fn safe() -> Vec<Rule> {
         // `pow(1, y)` is 1 for every y, again including NaN.
         rw!("one-pow"; "1 ^ ?x" => "1"),
         // `pow(+0, y)` is +0 only above zero: at y = 0 it is 1, below it is an
-        // infinity, and at NaN it is NaN.
+        // infinity, and at NaN it is NaN. The base also matches a written
+        // `-0.0` — see `sin-zero` below — but harmlessly, because the
+        // right-hand side is that very e-class rather than a fresh `+0`.
         rw!("zero-pow"; "0 ^ ?x" => "0", if "?x > 0", is_positive("?x")),
         // C99 fixes all three exactly: exp(±0) is 1, log(1) is +0, cos(±0) is 1.
         rw!("exp-zero"; "exp(0)" => "1"),
         rw!("ln-one"; "ln(1)" => "0"),
         rw!("cos-zero"; "cos(0)" => "1"),
         // `sin` and `tan` return their argument at zero, so they carry the
-        // sign of the zero through. That costs nothing here: the e-graph's
-        // constant table hashes -0.0 and +0.0 to the same literal, so the two
-        // are already one node before any rule looks at them.
+        // sign of the zero through, and a rule naming `+0` on both sides would
+        // have to justify the -0.0 case. It does not arise: [`crate::sym::F`]
+        // hashes -0.0 and +0.0 alike, so the two are one e-class before any
+        // rule looks at them, and the right-hand side here is that same class.
         rw!("sin-zero"; "sin(0)" => "0"),
         rw!("tan-zero"; "tan(0)" => "0"),
         // cos of the double nearest pi is -1 + 7.5e-33, and the next double
@@ -116,7 +119,10 @@ pub fn fast_math() -> Vec<Rule> {
         rw!("pow-pow-int"; "(?x ^ ?a) ^ ?b" => "?x ^ (?a * ?b)",
             if "?a and ?b are integers", and(is_int_const("?a"), is_int_const("?b"))),
         // Splitting doubles the rounding error and the `pow` count; joining
-        // halves both, which is why both directions are here.
+        // halves both, which is why both directions are here. Neither holds
+        // over the reals either: `((-1) * (-1)) ^ 0.5` is 1 while
+        // `(-1) ^ 0.5 * (-1) ^ 0.5` is NaN, so the split form can invent a
+        // domain error the joined one never had.
         rw!("pow-prod"; "(?x * ?y) ^ ?a" => "?x ^ ?a * ?y ^ ?a"),
         rw!("pow-prod-join"; "?x ^ ?a * ?y ^ ?a" => "(?x * ?y) ^ ?a"),
         // -- roots ----------------------------------------------------------
@@ -150,14 +156,17 @@ pub fn fast_math() -> Vec<Rule> {
         rw!("exp-recip"; "1 / exp(?x)" => "exp(-?x)"),
         // Splitting a log is only vacuously true where it fails: `ln(-2 * -3)`
         // is an ordinary number while `ln(-2) + ln(-3)` is NaN, and the reals
-        // never had the right-hand side to begin with.
+        // never had the right-hand side to begin with. Both directions are
+        // worth their place because which one pays depends on the context:
+        // joining drops a `ln`, splitting can expose a `ln(exp(_))` to cancel.
         rw!("ln-prod"; "ln(?x * ?y)" => "ln(?x) + ln(?y)"),
         rw!("ln-prod-join"; "ln(?x) + ln(?y)" => "ln(?x * ?y)"),
         rw!("ln-quot"; "ln(?x / ?y)" => "ln(?x) - ln(?y)"),
         rw!("ln-quot-join"; "ln(?x) - ln(?y)" => "ln(?x / ?y)"),
-        // Only the contracting direction: `?k * ln(?x)` matches every product
-        // with a logarithm in it, and the term it builds is dearer than the
-        // one it came from, so it would grow the graph for nothing.
+        // Only this direction. The reverse, `?k * ln(?x) => ln(?x ^ ?k)`,
+        // matches every product with a logarithm anywhere in it and builds a
+        // term dearer than the one it came from, so it would grow the graph
+        // for nothing.
         rw!("ln-pow"; "ln(?x ^ ?k)" => "?k * ln(?x)"),
         // -- trigonometry ---------------------------------------------------
         //
@@ -223,6 +232,42 @@ mod tests {
         best
     }
 
+    /// True when saturating `src` puts `other` in the root's e-class.
+    ///
+    /// Extraction can only reveal a rewrite that made the term cheaper, so it
+    /// says nothing about `sin(-?x) => -sin(?x)`, whose two sides cost the
+    /// same. This asks the e-graph directly whether the equality was proven.
+    fn proves_equal(src: &str, other: &str, rules: &[Rule]) -> bool {
+        let expr = parse(src).unwrap();
+        let mut runner = Runner::new(MathAnalysis::default())
+            .with_iter_limit(15)
+            .with_node_limit(20_000)
+            .with_expr(&expr)
+            .run(rules);
+        let root = runner.root();
+        let other = runner.egraph.add_expr(&parse(other).unwrap());
+        runner.egraph.find(other) == runner.egraph.find(root)
+    }
+
+    /// Every double that makes a rule in this module interesting, plus two
+    /// unremarkable ones so the grid is not all corner cases.
+    const HARD: [f64; 14] = [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        f64::MIN_POSITIVE,
+        -f64::MIN_POSITIVE,
+        5e-324,
+        f64::MAX,
+        f64::MIN,
+        2.5,
+        -3.25,
+    ];
+
     #[test]
     fn rule_names_are_unique() {
         let mut names: Vec<String> = safe()
@@ -254,6 +299,47 @@ mod tests {
         assert!(same_bits(0.0f64.atan2(1.0), 0.0));
         assert_eq!(1.0f64.atan2(0.0), pi / 2.0);
         assert_eq!(1.0f64.atan2(-0.0), pi / 2.0);
+        assert_eq!(inf.atan2(0.0), pi / 2.0);
+        // What the clamp rules' side conditions exist for: `min`/`max` drop a
+        // NaN rather than propagating it, so an unguarded clamp would turn a
+        // NaN atan2 into ±pi.
+        assert_eq!(nan.min(pi), pi);
+        assert_eq!(nan.max(-pi), -pi);
+    }
+
+    #[test]
+    fn trig_parity_rules_prove_the_equality() {
+        let rules = safe();
+        assert_eq!(optimize("cos(-x)", &rules).pretty(), "cos(x)");
+        // `sin(-x)` and `-sin(x)` cost the same, so only the e-graph can say
+        // whether the rule fired.
+        assert!(proves_equal("sin(-x)", "-sin(x)", &rules));
+        assert!(proves_equal("tan(-x)", "-tan(x)", &rules));
+        // Nothing here claims the odd functions are even as well.
+        assert!(!proves_equal("sin(-x)", "sin(x)", &rules));
+        assert!(!proves_equal("tan(-x)", "tan(x)", &rules));
+    }
+
+    #[test]
+    fn atan2_zero_rules_need_a_positive_other_argument() {
+        let rules = safe();
+        assert_eq!(
+            optimize("atan2(0, max(min(x, 3), 1))", &rules).pretty(),
+            "0"
+        );
+        let quarter_turn = optimize("atan2(max(min(x, 3), 1), 0)", &rules);
+        assert_eq!(
+            eval(&quarter_turn, &Env::new()).unwrap(),
+            std::f64::consts::PI / 2.0
+        );
+        // A bare variable could be negative, zero, or NaN in either slot, and
+        // atan2 returns something different in each of those cases.
+        assert!(optimize("atan2(0, x)", &rules)
+            .pretty()
+            .starts_with("atan2"));
+        assert!(optimize("atan2(x, 0)", &rules)
+            .pretty()
+            .starts_with("atan2"));
     }
 
     #[test]
@@ -268,8 +354,14 @@ mod tests {
     }
 
     /// The claim the safe tier makes, checked the only way it can be: run the
-    /// rules, extract, and compare the two expressions bit for bit on values
-    /// that include the infinities, both zeros, and NaN.
+    /// rules, extract, and compare the two expressions bit for bit.
+    ///
+    /// The inputs are the exhaustive product of [`HARD`] — so the infinities,
+    /// both zeros, a subnormal and NaN are tried in every slot of every case,
+    /// rather than turning up with whatever probability a sampler gives them —
+    /// with a few random draws appended to cover ordinary magnitudes. Every
+    /// rule in [`safe`] that can take a variable appears at least once; the
+    /// clamps are what let the guarded rules fire at all.
     #[test]
     fn safe_rules_preserve_every_bit() {
         let rules = safe();
@@ -277,6 +369,7 @@ mod tests {
             "x ^ 1",
             "x ^ 0",
             "1 ^ x",
+            "0 ^ max(min(x, 3), 1)",
             "sin(-x)",
             "cos(-x)",
             "tan(-x)",
@@ -284,27 +377,41 @@ mod tests {
             "cos(-(x * y))",
             "sin(-x) * cos(-y)",
             "exp(0) * x",
+            "ln(1) + x",
+            "cos(0) * x",
+            "sin(0) + x",
+            "tan(0) + x",
+            "cos(pi) * x",
             "atan2(0, 4) + y",
+            "atan2(0, max(min(x, 3), 1))",
+            "atan2(max(min(x, 3), 1), 0) * y",
+            "min(atan2(max(min(y, 2), 1), max(min(x, 2), 1)), pi)",
+            "max(atan2(max(min(y, 2), 1), max(min(x, 2), 1)), -pi)",
         ];
         let mut rng = Rng::seed(0xC0FFEE);
+        let mut values = HARD.to_vec();
+        values.extend((0..6).map(|_| rng.float()));
+
         for src in cases {
             let before = parse(src).unwrap();
             let after = optimize(src, &rules);
-            for _ in 0..500 {
-                let mut env = Env::new();
-                env.insert(Sym::new("x"), rng.float());
-                env.insert(Sym::new("y"), rng.float());
-                let a = eval(&before, &env).unwrap();
-                let b = eval(&after, &env).unwrap();
-                assert!(
-                    same_bits(a, b),
-                    "`{}` became `{}`, which gives {:e} instead of {:e} at {:?}",
-                    src,
-                    after.pretty(),
-                    b,
-                    a,
-                    env
-                );
+            for &x in &values {
+                for &y in &values {
+                    let mut env = Env::new();
+                    env.insert(Sym::new("x"), x);
+                    env.insert(Sym::new("y"), y);
+                    let a = eval(&before, &env).unwrap();
+                    let b = eval(&after, &env).unwrap();
+                    assert!(
+                        same_bits(a, b),
+                        "`{}` became `{}`, which gives {:e} instead of {:e} at {:?}",
+                        src,
+                        after.pretty(),
+                        b,
+                        a,
+                        env
+                    );
+                }
             }
         }
     }
@@ -322,8 +429,13 @@ mod tests {
         let rules = safe();
         // `min`/`max` are the cheapest way to hand the interval analysis a
         // bound it can use: a bare variable could be anything, NaN included.
-        assert_eq!(optimize("0 ^ max(min(e, 3), 1)", &rules).pretty(), "0");
-        assert!(optimize("0 ^ e", &rules).pretty().contains('^'));
+        assert_eq!(optimize("0 ^ max(min(k, 3), 1)", &rules).pretty(), "0");
+        assert!(optimize("0 ^ k", &rules).pretty().contains('^'));
+        // A non-positive exponent is the case the guard is there for: `0 ^ 0`
+        // is 1 and `0 ^ -1` is an infinity, neither of them zero.
+        assert!(optimize("0 ^ min(max(k, -3), -1)", &rules)
+            .pretty()
+            .contains('^'));
     }
 
     #[test]

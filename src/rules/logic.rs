@@ -293,6 +293,7 @@ mod tests {
         env[&Sym::new(v)]
     }
 
+    /// What [`super::is_not_nan`] admits.
     fn not_nan(env: &Env, v: &str) -> bool {
         !val(env, v).is_nan()
     }
@@ -304,11 +305,11 @@ mod tests {
     }
 
     /// Each guarded rule's side condition, rewritten as a predicate on the
-    /// values its variables take. These are the reasoning the rules encode,
-    /// and they must admit *everything* the interval predicate admits:
-    /// tightening one here would quietly stop testing cases the rule claims.
-    /// `as_constant` only ever reports a finite double, which is why the two
-    /// `if-const` guards may ask for `is_finite`.
+    /// values its variables take: the reasoning the side conditions encode,
+    /// written out. Every one must admit *everything* the interval predicate
+    /// admits, since tightening one here would quietly stop testing cases the
+    /// rule still claims. `as_constant` only ever reports a finite double,
+    /// which is why the two `if-const` guards may ask for `is_finite`.
     fn guard_for(name: &str) -> Option<fn(&Env) -> bool> {
         let f: fn(&Env) -> bool = match name {
             "if-const-true" => |e: &Env| val(e, "?c").is_finite() && val(e, "?c") != 0.0,

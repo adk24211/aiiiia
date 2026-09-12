@@ -69,6 +69,14 @@ impl Program {
     /// One allocation per call for the slot array. Callers evaluating the same
     /// program many times should use [`Program::eval_with`] and keep the
     /// buffer.
+    ///
+    /// # Panics
+    ///
+    /// If `args.len()` is not [`Program::params`]`.len()`. The fields of
+    /// `Program` are public, so a hand-built program that names a slot beyond
+    /// `slots`, a constant past the pool, or a parameter past `params` will
+    /// also panic on the offending index. Programs from
+    /// [`Program::compile`] never do.
     pub fn eval(&self, args: &[f64]) -> f64 {
         let mut slots = vec![0.0; self.slots];
         self.eval_with(args, &mut slots)
@@ -469,12 +477,19 @@ impl<'a> Compiler<'a> {
                 op,
                 a: operands[0],
             },
-            op => Instr::Bin {
+            op if op.arity() == 2 => Instr::Bin {
                 dst,
                 op,
                 a: operands[0],
                 b: operands[1],
             },
+            // `Select` runs `If` unconditionally, so it must not become the
+            // silent home of any other three-argument operator added later.
+            op => unreachable!(
+                "{:?} takes {} children and has no instruction",
+                op,
+                op.arity()
+            ),
         };
         self.code.push(instr);
         Ok(dst)
