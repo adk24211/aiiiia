@@ -230,7 +230,12 @@ fn commutative_arguments_are_stored_in_a_canonical_order() {
         let l = eg.add_expr(&parse(left).unwrap());
         let r = eg.add_expr(&parse(right).unwrap());
         eg.rebuild();
-        assert!(eg.equivalent(l, r), "`{}` and `{}` are not equivalent", left, right);
+        assert!(
+            eg.equivalent(l, r),
+            "`{}` and `{}` are not equivalent",
+            left,
+            right
+        );
     }
 
     // Non-commutative operators must stay distinct.
@@ -239,7 +244,12 @@ fn commutative_arguments_are_stored_in_a_canonical_order() {
         let l = eg.add_expr(&parse(left).unwrap());
         let r = eg.add_expr(&parse(right).unwrap());
         eg.rebuild();
-        assert!(!eg.equivalent(l, r), "`{}` and `{}` were conflated", left, right);
+        assert!(
+            !eg.equivalent(l, r),
+            "`{}` and `{}` were conflated",
+            left,
+            right
+        );
     }
 }
 

@@ -237,7 +237,10 @@ impl<A: Analysis> EGraph<A> {
         let mut map: HashMap<Id, Id> = HashMap::new();
         let mut last = None;
         for (i, n) in expr.nodes().iter().enumerate() {
-            let id = self.add(ENode::new(n.op, n.children.iter().map(|c| map[c]).collect()));
+            let id = self.add(ENode::new(
+                n.op,
+                n.children.iter().map(|c| map[c]).collect(),
+            ));
             map.insert(Id::new(i), id);
             last = Some(id);
         }
@@ -460,7 +463,11 @@ impl<A: Analysis> EGraph<A> {
         self.memo.reserve(self.total_nodes());
         let mut parents: Vec<(Id, ENode, Id)> = Vec::new();
         for &id in &ids {
-            let nodes = self.classes[id.index()].as_ref().expect("class").nodes.clone();
+            let nodes = self.classes[id.index()]
+                .as_ref()
+                .expect("class")
+                .nodes
+                .clone();
             for n in nodes {
                 for &child in &n.children {
                     parents.push((self.find(child), n.clone(), id));
@@ -524,10 +531,9 @@ impl<A: Analysis> EGraph<A> {
                     );
                 }
                 node_owner.insert(n.clone(), class.id);
-                let found = self
-                    .memo
-                    .get(n)
-                    .unwrap_or_else(|| panic!("node {:?} of class {:?} missing from memo", n, class.id));
+                let found = self.memo.get(n).unwrap_or_else(|| {
+                    panic!("node {:?} of class {:?} missing from memo", n, class.id)
+                });
                 assert_eq!(
                     self.find(*found),
                     class.id,
@@ -589,7 +595,9 @@ impl<A: Analysis> EGraph<A> {
     /// Render the graph as Graphviz DOT, one cluster per e-class.
     pub fn to_dot(&self) -> String {
         let mut s = String::from("digraph egraph {\n");
-        s.push_str("  compound=true\n  clusterrank=local\n  node [shape=box, fontname=\"monospace\"]\n");
+        s.push_str(
+            "  compound=true\n  clusterrank=local\n  node [shape=box, fontname=\"monospace\"]\n",
+        );
         for class in self.classes() {
             s.push_str(&format!(
                 "  subgraph cluster_{} {{\n    style=dashed\n    label=\"{}\"\n",

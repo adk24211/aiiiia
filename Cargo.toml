@@ -2,7 +2,7 @@
 name = "saturn"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.86"
 description = "A zero-dependency equality saturation engine: e-graphs, rewrite rules, cost extraction, symbolic differentiation, and an optimizing bytecode compiler."
 license = "MIT"
 readme = "README.md"

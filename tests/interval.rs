@@ -207,7 +207,10 @@ fn predicates_match_their_meanings() {
 fn zero_times_infinity_admits_nan() {
     let zero = Interval::point(0.0);
     let inf = Interval::point(f64::INFINITY);
-    assert!(zero.mul(inf).nan, "0 * inf is NaN and the domain must say so");
+    assert!(
+        zero.mul(inf).nan,
+        "0 * inf is NaN and the domain must say so"
+    );
     assert!(inf.mul(zero).nan);
 }
 

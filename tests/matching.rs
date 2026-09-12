@@ -88,7 +88,10 @@ fn nested_patterns_match_at_every_depth() {
 #[test]
 fn a_bare_variable_is_rejected_as_a_left_hand_side() {
     let r: Result<Rewrite<MathAnalysis>, String> = Rewrite::parse("bad", "?a => ?a + 0");
-    assert!(r.is_err(), "a pattern that matches every class was accepted");
+    assert!(
+        r.is_err(),
+        "a pattern that matches every class was accepted"
+    );
     assert!(r.unwrap_err().contains("matches everything"));
 }
 
@@ -136,7 +139,11 @@ fn a_conditional_rule_fires_only_when_its_condition_holds() {
     rule.apply(&mut eg, &ms);
     eg.rebuild();
     let (_, best) = Extractor::new(&eg, AstSize).find_best(root);
-    assert_eq!(best.to_sexp(), "(/ x x)", "cancelled an unprovable division");
+    assert_eq!(
+        best.to_sexp(),
+        "(/ x x)",
+        "cancelled an unprovable division"
+    );
 
     // `3` is finite and nonzero, so it cancels.
     let (mut eg, root) = graph("(2 + 1) / (2 + 1)");

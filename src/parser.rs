@@ -188,9 +188,10 @@ impl<'a> Parser<'a> {
             }
             Tok::Num => {
                 self.bump();
-                let v: f64 = t.text.parse().map_err(|_| {
-                    self.err(format!("`{}` is not a valid number", t.text), &t)
-                })?;
+                let v: f64 = t
+                    .text
+                    .parse()
+                    .map_err(|_| self.err(format!("`{}` is not a valid number", t.text), &t))?;
                 Ok(self.expr.constant(v))
             }
             Tok::PatVar => {
@@ -217,10 +218,7 @@ impl<'a> Parser<'a> {
         // A call: `sqrt(x)`, `min(a, b)`, `if(c, a, b)`, `d(x, e)`.
         if self.peek().kind == Tok::LParen {
             let Some(op) = Op::from_fn_name(name) else {
-                return Err(self.err(
-                    format!("unknown function `{}`", name),
-                    &t,
-                ));
+                return Err(self.err(format!("unknown function `{}`", name), &t));
             };
             self.bump();
             let mut args = Vec::new();

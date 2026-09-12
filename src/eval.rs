@@ -64,9 +64,7 @@ pub fn eval_at(expr: &RecExpr, root: Id, env: &Env) -> Result<f64, EvalError> {
 }
 
 /// Build an environment from `name=value` strings, as the CLI's `-D` takes.
-pub fn parse_bindings<'a>(
-    pairs: impl IntoIterator<Item = &'a str>,
-) -> Result<Env, String> {
+pub fn parse_bindings<'a>(pairs: impl IntoIterator<Item = &'a str>) -> Result<Env, String> {
     let mut env = Env::new();
     for p in pairs {
         let (name, value) = p

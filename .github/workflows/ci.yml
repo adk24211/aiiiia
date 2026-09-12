@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The MSRV is pinned in Cargo.toml; build it here so a dependency-free
+        # crate cannot drift onto a newer feature without anyone noticing.
+        rust: [stable, "1.86"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - run: cargo build --all-targets
+      - run: cargo test --all-targets
+      - run: cargo test --doc
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets
+
+  fuzz:
+    # The safe rule tier claims to preserve IEEE-754 results exactly. Run the
+    # soundness fuzzer on every push so that claim is tested, not just stated.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: ./target/release/saturn fuzz --rules safe --count 3000 --samples 300
+      - run: ./target/release/saturn fuzz --rules safe --count 1500 --logic --samples 300

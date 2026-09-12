@@ -12,12 +12,30 @@
 use std::fmt;
 
 /// `lo <= hi` bounds on a value, plus whether it may be NaN.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Interval {
     pub lo: f64,
     pub hi: f64,
     /// The value may be NaN. When this is false, the bounds are meaningful.
     pub nan: bool,
+}
+
+/// Compare two bounds reflexively.
+///
+/// `Eq` requires reflexivity, and the analysis fixpoint decides it has
+/// converged by comparing facts. A bound that compared unequal to itself would
+/// make that loop run forever, so a NaN bound -- which the transfer functions
+/// try hard never to produce, but which no type forbids -- must still equal
+/// itself here.
+#[inline]
+fn same_bound(a: f64, b: f64) -> bool {
+    a == b || (a.is_nan() && b.is_nan())
+}
+
+impl PartialEq for Interval {
+    fn eq(&self, other: &Interval) -> bool {
+        same_bound(self.lo, other.lo) && same_bound(self.hi, other.hi) && self.nan == other.nan
+    }
 }
 
 impl Eq for Interval {}
@@ -164,7 +182,14 @@ impl Interval {
     }
 
     // -- transfer functions -------------------------------------------------
+    //
+    // These are named after the operators they abstract, not after the
+    // `std::ops` traits they resemble. Implementing `Add` for an interval
+    // would let `a + b` read as concrete arithmetic on a numeric type, which
+    // is exactly the confusion to avoid: these compute a *range* that the
+    // concrete result is guaranteed to fall inside.
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(self, o: Interval) -> Interval {
         if self.is_bottom_reals() || o.is_bottom_reals() {
             return Interval::TOP;
@@ -187,10 +212,12 @@ impl Interval {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn sub(self, o: Interval) -> Interval {
         self.add(o.neg())
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn neg(self) -> Interval {
         if self.is_bottom_reals() {
             return Interval::TOP.with_nan(self.nan);
@@ -202,6 +229,7 @@ impl Interval {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(self, o: Interval) -> Interval {
         if self.is_bottom_reals() || o.is_bottom_reals() {
             return Interval::TOP;
@@ -211,7 +239,12 @@ impl Interval {
             a.lo <= 0.0 && a.hi >= 0.0 && (b.lo == f64::NEG_INFINITY || b.hi == f64::INFINITY)
         };
         let nan = self.nan || o.nan || zero_times_inf(&self, &o) || zero_times_inf(&o, &self);
-        let prods = [self.lo * o.lo, self.lo * o.hi, self.hi * o.lo, self.hi * o.hi];
+        let prods = [
+            self.lo * o.lo,
+            self.lo * o.hi,
+            self.hi * o.lo,
+            self.hi * o.hi,
+        ];
         // Any NaN among the corner products came from 0 * inf, already flagged.
         let clean: Vec<f64> = prods.iter().copied().filter(|p| !p.is_nan()).collect();
         if clean.is_empty() {
@@ -226,6 +259,7 @@ impl Interval {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn div(self, o: Interval) -> Interval {
         if self.is_bottom_reals() || o.is_bottom_reals() {
             return Interval::TOP;
@@ -234,15 +268,18 @@ impl Interval {
         let straddles_zero = o.lo <= 0.0 && o.hi >= 0.0;
         let both_inf = (self.lo == f64::NEG_INFINITY || self.hi == f64::INFINITY)
             && (o.lo == f64::NEG_INFINITY || o.hi == f64::INFINITY);
-        let nan = self.nan
-            || o.nan
-            || both_inf
-            || (straddles_zero && self.lo <= 0.0 && self.hi >= 0.0);
+        let nan =
+            self.nan || o.nan || both_inf || (straddles_zero && self.lo <= 0.0 && self.hi >= 0.0);
         if straddles_zero {
             // The quotient is unbounded in at least one direction.
             return Interval::TOP.with_nan(nan);
         }
-        let qs = [self.lo / o.lo, self.lo / o.hi, self.hi / o.lo, self.hi / o.hi];
+        let qs = [
+            self.lo / o.lo,
+            self.lo / o.hi,
+            self.hi / o.lo,
+            self.hi / o.hi,
+        ];
         let clean: Vec<f64> = qs.iter().copied().filter(|q| !q.is_nan()).collect();
         if clean.is_empty() {
             return Interval::TOP;

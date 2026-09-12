@@ -80,8 +80,22 @@ impl Args {
         // Flags that consume the following argument when it is not glued on
         // with `=`.
         const TAKES_VALUE: &[&str] = &[
-            "rules", "cost", "iters", "nodes", "time", "samples", "seed", "tol", "color", "D",
-            "define", "scheduler", "count", "depth", "max-failures", "set",
+            "rules",
+            "cost",
+            "iters",
+            "nodes",
+            "time",
+            "samples",
+            "seed",
+            "tol",
+            "color",
+            "D",
+            "define",
+            "scheduler",
+            "count",
+            "depth",
+            "max-failures",
+            "set",
         ];
         while let Some(a) = it.next() {
             if let Some(rest) = a.strip_prefix("--") {
@@ -98,7 +112,9 @@ impl Args {
                         }
                     }
                 }
-            } else if a.starts_with('-') && a.len() > 1 && !a[1..].starts_with(|c: char| c.is_ascii_digit())
+            } else if a.starts_with('-')
+                && a.len() > 1
+                && !a[1..].starts_with(|c: char| c.is_ascii_digit())
             {
                 let short = &a[1..2];
                 let glued = &a[2..];
@@ -288,7 +304,11 @@ fn pct(before: f64, after: f64) -> String {
 }
 
 fn show_expr(st: &Style, label: &str, e: &RecExpr, shared: bool) {
-    let text = if shared { e.pretty_shared() } else { e.pretty() };
+    let text = if shared {
+        e.pretty_shared()
+    } else {
+        e.pretty()
+    };
     let mut lines = text.lines();
     let first = lines.next().unwrap_or("");
     println!("  {} {}", st.dim(&format!("{:<9}", label)), st.bold(first));
@@ -310,12 +330,11 @@ fn cmd_opt(args: &Args, st: &Style) -> Result<(), String> {
 
     show_expr(st, "input", &expr, shared);
     println!(
-        "  {} {} nodes, {} {} {}",
+        "  {} {} nodes, {} {}",
         st.dim("         "),
         expr.dag_size(),
         before,
         opts.cost.name(),
-        ""
     );
     println!();
     show_expr(st, "optimized", &best, shared);
@@ -369,11 +388,18 @@ fn cmd_opt(args: &Args, st: &Style) -> Result<(), String> {
             println!("  {}", st.dim(line));
         }
         println!();
-        println!("  {}", st.dim("iteration    classes    nodes   matches   time"));
+        println!(
+            "  {}",
+            st.dim("iteration    classes    nodes   matches   time")
+        );
         for it in &runner.iterations {
             println!(
                 "  {:>9}  {:>9} {:>8}  {:>8}   {:.1?}",
-                it.index, it.classes_after, it.nodes_after, it.total_matches, it.total_time()
+                it.index,
+                it.classes_after,
+                it.nodes_after,
+                it.total_matches,
+                it.total_time()
             );
         }
     }
@@ -385,7 +411,11 @@ fn cmd_eval(args: &Args, st: &Style) -> Result<(), String> {
     let expr = parse(&src).map_err(|e| e.render())?;
     let env: Env = parse_bindings(args.all("D").into_iter().chain(args.all("define")))?;
 
-    let missing: Vec<Sym> = expr.vars().into_iter().filter(|v| !env.contains_key(v)).collect();
+    let missing: Vec<Sym> = expr
+        .vars()
+        .into_iter()
+        .filter(|v| !env.contains_key(v))
+        .collect();
     if !missing.is_empty() {
         let names: Vec<String> = missing.iter().map(|s| s.to_string()).collect();
         return Err(format!(
@@ -414,7 +444,11 @@ fn format_value(v: f64) -> String {
     if v.is_nan() {
         "NaN".into()
     } else if v.is_infinite() {
-        if v > 0.0 { "inf".into() } else { "-inf".into() }
+        if v > 0.0 {
+            "inf".into()
+        } else {
+            "-inf".into()
+        }
     } else if v == v.trunc() && v.abs() < 1e15 {
         format!("{}", v as i64)
     } else {
@@ -577,7 +611,10 @@ fn cmd_check(args: &Args, st: &Style) -> Result<bool, String> {
 }
 
 fn cmd_rules(args: &Args, st: &Style) -> Result<(), String> {
-    match args.get("set").or_else(|| args.positional.first().map(|s| s.as_str())) {
+    match args
+        .get("set")
+        .or_else(|| args.positional.first().map(|s| s.as_str()))
+    {
         None => {
             println!("  {}", st.dim("rule sets"));
             for (name, desc) in rules::set_names() {
@@ -686,7 +723,10 @@ fn cmd_fuzz(args: &Args, st: &Style) -> Result<bool, String> {
         tolerance
     );
     let mut failures = 0;
-    for (i, expr) in ExprStream::new(seed, grammar, depth).take(count).enumerate() {
+    for (i, expr) in ExprStream::new(seed, grammar, depth)
+        .take(count)
+        .enumerate()
+    {
         let (best, _, _) = opts.optimize(&expr);
         let report = checker.compare(&expr, &best);
         if !report.ok() {
@@ -889,10 +929,7 @@ fn main() -> ExitCode {
         "bench" => cmd_bench(&args, &st).map(|_| true),
         "fuzz" => cmd_fuzz(&args, &st),
         "repl" => cmd_repl(&st).map(|_| true),
-        other => Err(format!(
-            "unknown command `{}`; run `saturn --help`",
-            other
-        )),
+        other => Err(format!("unknown command `{}`; run `saturn --help`", other)),
     };
 
     match result {

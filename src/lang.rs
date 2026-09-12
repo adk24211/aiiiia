@@ -374,7 +374,9 @@ impl ENode {
     /// hashcons to the same node. This is what makes commutativity free rather
     /// than a rewrite rule that doubles the e-graph.
     pub fn normalize(&mut self) {
-        if self.op.is_commutative() && self.children.len() == 2 && self.children[0] > self.children[1]
+        if self.op.is_commutative()
+            && self.children.len() == 2
+            && self.children[0] > self.children[1]
         {
             self.children.swap(0, 1);
         }

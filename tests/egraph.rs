@@ -40,8 +40,14 @@ fn congruence_propagates_upward() {
     eg.union(a, b);
     eg.rebuild();
     eg.check_invariants();
-    assert!(eg.equivalent(fa, fb), "congruence did not reach one level up");
-    assert!(eg.equivalent(gfa, gfb), "congruence did not reach two levels up");
+    assert!(
+        eg.equivalent(fa, fb),
+        "congruence did not reach one level up"
+    );
+    assert!(
+        eg.equivalent(gfa, gfb),
+        "congruence did not reach two levels up"
+    );
 }
 
 #[test]

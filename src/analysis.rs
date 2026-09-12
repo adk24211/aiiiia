@@ -32,8 +32,8 @@ pub struct NoAnalysis;
 
 impl Analysis for NoAnalysis {
     type Data = ();
-    fn make(_: &EGraph<Self>, _: &ENode) -> () {}
-    fn merge(&mut self, _: (), _: ()) -> () {}
+    fn make(_: &EGraph<Self>, _: &ENode) {}
+    fn merge(&mut self, _: (), _: ()) {}
 }
 
 /// What [`MathAnalysis`] knows about the value an e-class denotes.
@@ -188,7 +188,11 @@ impl Analysis for MathAnalysis {
             return;
         };
         // Nothing to do if the class already contains the literal.
-        if egraph[id].nodes.iter().any(|n| n.as_const() == Some(c.get())) {
+        if egraph[id]
+            .nodes
+            .iter()
+            .any(|n| n.as_const() == Some(c.get()))
+        {
             return;
         }
         let lit = egraph.add(ENode::leaf(Op::Const(c)));

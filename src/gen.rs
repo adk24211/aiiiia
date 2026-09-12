@@ -30,7 +30,15 @@ impl Default for Grammar {
         Grammar {
             vars: vec!["x".into(), "y".into(), "z".into()],
             constants: vec![0.0, 1.0, 2.0, -1.0, 0.5, 3.0, 10.0],
-            binary: vec![Op::Add, Op::Sub, Op::Mul, Op::Div, Op::Pow, Op::Min, Op::Max],
+            binary: vec![
+                Op::Add,
+                Op::Sub,
+                Op::Mul,
+                Op::Div,
+                Op::Pow,
+                Op::Min,
+                Op::Max,
+            ],
             unary: vec![
                 Op::Neg,
                 Op::Sqrt,
@@ -86,13 +94,7 @@ pub fn random_expr(rng: &mut Rng, grammar: &Grammar, depth: usize) -> RecExpr {
     expr.compact(root)
 }
 
-fn build(
-    rng: &mut Rng,
-    g: &Grammar,
-    depth: usize,
-    expr: &mut RecExpr,
-    built: &mut Vec<Id>,
-) -> Id {
+fn build(rng: &mut Rng, g: &Grammar, depth: usize, expr: &mut RecExpr, built: &mut Vec<Id>) -> Id {
     if !built.is_empty() && rng.bool(g.share) {
         return *rng.pick(built);
     }
@@ -191,7 +193,10 @@ mod tests {
             .take(20)
             .map(|e| e.to_sexp())
             .collect();
-        let b: Vec<String> = ExprStream::new(7, g, 4).take(20).map(|e| e.to_sexp()).collect();
+        let b: Vec<String> = ExprStream::new(7, g, 4)
+            .take(20)
+            .map(|e| e.to_sexp())
+            .collect();
         assert_eq!(a, b);
     }
 
@@ -202,7 +207,10 @@ mod tests {
             .take(20)
             .map(|e| e.to_sexp())
             .collect();
-        let b: Vec<String> = ExprStream::new(2, g, 4).take(20).map(|e| e.to_sexp()).collect();
+        let b: Vec<String> = ExprStream::new(2, g, 4)
+            .take(20)
+            .map(|e| e.to_sexp())
+            .collect();
         assert_ne!(a, b);
     }
 

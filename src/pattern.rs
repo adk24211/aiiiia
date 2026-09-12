@@ -181,8 +181,11 @@ impl Pattern {
     // -- matching -----------------------------------------------------------
 
     /// Every substitution under which this pattern denotes a term in `class`.
-    pub fn search_eclass<A: Analysis>(&self, egraph: &EGraph<A>, class: Id) -> Option<SearchMatches>
-    {
+    pub fn search_eclass<A: Analysis>(
+        &self,
+        egraph: &EGraph<A>,
+        class: Id,
+    ) -> Option<SearchMatches> {
         let mut out = Vec::new();
         self.match_node(egraph, self.root(), class, Subst::new(), &mut out);
         if out.is_empty() {
@@ -296,7 +299,10 @@ impl Pattern {
         for node in &self.nodes {
             let id = match node {
                 PatNode::Var(v) => subst.get(*v).unwrap_or_else(|| {
-                    panic!("pattern variable {} is unbound when instantiating {}", v, self)
+                    panic!(
+                        "pattern variable {} is unbound when instantiating {}",
+                        v, self
+                    )
                 }),
                 PatNode::Op(op, children) => {
                     let cs = children.iter().map(|&c| ids[c]).collect();
@@ -320,13 +326,21 @@ impl Pattern {
             PatNode::Op(Op::Const(c), _) => c.to_string(),
             PatNode::Op(Op::Var(s), _) => s.to_string(),
             PatNode::Op(op, cs) if op.is_infix() => {
-                format!("({} {} {})", self.write(cs[0]), op.name(), self.write(cs[1]))
+                format!(
+                    "({} {} {})",
+                    self.write(cs[0]),
+                    op.name(),
+                    self.write(cs[1])
+                )
             }
             PatNode::Op(op, cs) if cs.is_empty() => op.name().to_string(),
             PatNode::Op(op, cs) => format!(
                 "{}({})",
                 op.name(),
-                cs.iter().map(|&c| self.write(c)).collect::<Vec<_>>().join(", ")
+                cs.iter()
+                    .map(|&c| self.write(c))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }
     }

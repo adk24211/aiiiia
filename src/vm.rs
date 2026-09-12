@@ -19,11 +19,31 @@ pub struct Program {
 /// One instruction. `dst` and `src` index the slot array.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Instr {
-    LoadConst { dst: u16, k: u16 },
-    LoadParam { dst: u16, p: u16 },
-    Un { dst: u16, op: crate::lang::Op, a: u16 },
-    Bin { dst: u16, op: crate::lang::Op, a: u16, b: u16 },
-    Select { dst: u16, c: u16, a: u16, b: u16 },
+    LoadConst {
+        dst: u16,
+        k: u16,
+    },
+    LoadParam {
+        dst: u16,
+        p: u16,
+    },
+    Un {
+        dst: u16,
+        op: crate::lang::Op,
+        a: u16,
+    },
+    Bin {
+        dst: u16,
+        op: crate::lang::Op,
+        a: u16,
+        b: u16,
+    },
+    Select {
+        dst: u16,
+        c: u16,
+        a: u16,
+        b: u16,
+    },
 }
 
 impl Program {

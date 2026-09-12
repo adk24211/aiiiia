@@ -155,11 +155,7 @@ impl<A: Analysis> Rewrite<A> {
         let lp = Pattern::from_expr(&lhs);
         let rp = Pattern::from_expr(&rhs);
         Ok(vec![
-            Rewrite::new(
-                format!("{}-fwd", name),
-                lp.clone(),
-                Box::new(rp.clone()),
-            )?,
+            Rewrite::new(format!("{}-fwd", name), lp.clone(), Box::new(rp.clone()))?,
             Rewrite::new(format!("{}-rev", name), rp, Box::new(lp))?,
         ])
     }

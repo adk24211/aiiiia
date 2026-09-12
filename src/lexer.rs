@@ -70,7 +70,9 @@ impl ParseError {
             .unwrap_or(self.source.len());
         let line = &self.source[line_start..line_end];
         let col = self.start.saturating_sub(line_start);
-        let width = (self.end - self.start).max(1).min(line.len().saturating_sub(col).max(1));
+        let width = (self.end - self.start)
+            .max(1)
+            .min(line.len().saturating_sub(col).max(1));
         format!(
             "parse error: {}\n  {}\n  {}{}",
             self.message,
@@ -123,7 +125,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ParseError> {
         }
         let start = i;
 
-        if c.is_ascii_digit() || (c == '.' && i + 1 < b.len() && (b[i + 1] as char).is_ascii_digit())
+        if c.is_ascii_digit()
+            || (c == '.' && i + 1 < b.len() && (b[i + 1] as char).is_ascii_digit())
         {
             i += 1;
             while i < b.len() && ((b[i] as char).is_ascii_digit() || b[i] == b'.') {
@@ -183,11 +186,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ParseError> {
             continue;
         }
 
-        let two = if i + 1 < b.len() {
-            &src[i..i + 2]
-        } else {
-            ""
-        };
+        let two = if i + 1 < b.len() { &src[i..i + 2] } else { "" };
         let three = if i + 2 < b.len() { &src[i..i + 3] } else { "" };
 
         if three == "<=>" {

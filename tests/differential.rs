@@ -27,7 +27,9 @@ fn optimize(expr: &RecExpr, rules: &[Rewrite<MathAnalysis>]) -> RecExpr {
         .with_node_limit(4_000)
         .with_time_limit(Duration::from_secs(2))
         .run(rules);
-    Extractor::new(&runner.egraph, OpCost).find_best(runner.root()).1
+    Extractor::new(&runner.egraph, OpCost)
+        .find_best(runner.root())
+        .1
 }
 
 /// Saturate `count` generated expressions and assert the result still agrees
@@ -61,12 +63,24 @@ fn safe_arithmetic_rules_preserve_results_exactly() {
 
 #[test]
 fn safe_transcendental_rules_preserve_results_exactly() {
-    sweep(2, Grammar::default(), 300, &rules::transcendental::safe(), 0.0);
+    sweep(
+        2,
+        Grammar::default(),
+        300,
+        &rules::transcendental::safe(),
+        0.0,
+    );
 }
 
 #[test]
 fn safe_logic_rules_preserve_results_exactly() {
-    sweep(3, Grammar::default().with_logic(), 300, &rules::logic::safe(), 0.0);
+    sweep(
+        3,
+        Grammar::default().with_logic(),
+        300,
+        &rules::logic::safe(),
+        0.0,
+    );
 }
 
 #[test]
@@ -99,11 +113,7 @@ fn the_compiler_reproduces_the_interpreter_bit_for_bit() {
             let values: Vec<f64> = vars.iter().map(|_| rng.float()).collect();
             let env: Env = vars.iter().copied().zip(values.iter().copied()).collect();
             let interpreted = eval(&expr, &env).expect("every variable is bound");
-            let args: Vec<f64> = prog
-                .params()
-                .iter()
-                .map(|p| env[p])
-                .collect();
+            let args: Vec<f64> = prog.params().iter().map(|p| env[p]).collect();
             let compiled = prog.eval(&args);
             assert!(
                 interpreted.to_bits() == compiled.to_bits()

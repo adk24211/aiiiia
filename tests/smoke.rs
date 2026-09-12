@@ -62,7 +62,13 @@ fn saturation_simplifies() {
     let e = parse("x * (1 + 0) * 1").unwrap();
     let r = small_runner(&e).run(&rules());
     let (cost, best) = Extractor::new(&r.egraph, AstSize).find_best(r.root());
-    assert_eq!(best.to_sexp(), "x", "got {} at cost {}", best.to_sexp(), cost);
+    assert_eq!(
+        best.to_sexp(),
+        "x",
+        "got {} at cost {}",
+        best.to_sexp(),
+        cost
+    );
 }
 
 #[test]

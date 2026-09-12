@@ -45,10 +45,7 @@ pub type Rule = Rewrite<MathAnalysis>;
 
 type Cond = Box<dyn Fn(&EGraph<MathAnalysis>, Id, &Subst) -> bool + Send + Sync>;
 
-fn on_var(
-    v: &str,
-    f: impl Fn(&crate::interval::Interval) -> bool + Send + Sync + 'static,
-) -> Cond {
+fn on_var(v: &str, f: impl Fn(&crate::interval::Interval) -> bool + Send + Sync + 'static) -> Cond {
     let sym = Sym::new(v);
     Box::new(move |egraph, _matched, subst| match subst.get(sym) {
         Some(id) => f(&egraph[id].data.range),
@@ -190,7 +187,10 @@ pub fn set_names() -> Vec<(&'static str, &'static str)> {
         ("arith", "safe arithmetic identities"),
         ("transcendental", "safe exp/log/pow/sqrt/trig identities"),
         ("logic", "safe comparison, boolean, if, min/max/abs"),
-        ("fast-math", "real-valued identities that change float results"),
+        (
+            "fast-math",
+            "real-valued identities that change float results",
+        ),
         ("all", "default + fast-math"),
         ("none", "no rules; just parse, fold constants, and extract"),
     ]

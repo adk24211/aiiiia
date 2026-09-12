@@ -286,7 +286,8 @@ impl<A: Analysis> Runner<A> {
 
     /// The canonical id of the first root, after saturation.
     pub fn root(&self) -> Id {
-        self.egraph.find(*self.roots.first().expect("no root expression was added"))
+        self.egraph
+            .find(*self.roots.first().expect("no root expression was added"))
     }
 
     fn check_limits(&self, iteration: usize) -> Option<StopReason> {
