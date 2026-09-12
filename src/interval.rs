@@ -174,9 +174,15 @@ impl Interval {
             || o.nan
             || (self.lo == f64::NEG_INFINITY && o.hi == f64::INFINITY)
             || (self.hi == f64::INFINITY && o.lo == f64::NEG_INFINITY);
+        // A bound can itself come out NaN when the two infinities meet at that
+        // corner. The NaN is recorded in the flag; the bound must fall back to
+        // the unbounded side, because the *other* corners can still produce
+        // ordinary reals and those have to stay inside the interval.
+        let lo = widen_lo(self.lo + o.lo);
+        let hi = widen_hi(self.hi + o.hi);
         Interval {
-            lo: widen_lo(self.lo + o.lo),
-            hi: widen_hi(self.hi + o.hi),
+            lo: if lo.is_nan() { f64::NEG_INFINITY } else { lo },
+            hi: if hi.is_nan() { f64::INFINITY } else { hi },
             nan,
         }
     }

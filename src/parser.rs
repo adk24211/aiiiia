@@ -263,7 +263,7 @@ impl<'a> Parser<'a> {
             return Ok(self.expr.op(op, args));
         }
 
-        // A `let`-bound name shadows everything; innermost binding wins.
+        // A `let`-bound name shadows a named constant; innermost binding wins.
         let sym = Sym::new(name);
         if let Some(&(_, id)) = self.scope.iter().rev().find(|(s, _)| *s == sym) {
             return Ok(id);
@@ -277,13 +277,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_let(&mut self) -> Result<Id, ParseError> {
+        // Any name may be bound, including one that also names a built-in.
+        // A name is a call only when it is directly followed by `(`, so
+        // `let d = 1 in d + d(x, x)` binds the variable and still calls the
+        // derivative operator. Rejecting the binding instead would make `d`
+        // unusable as a coefficient name, which is exactly what people write.
         let name_tok = self.expect(Tok::Ident)?;
-        if Op::from_fn_name(&name_tok.text).is_some() {
-            return Err(self.err(
-                format!("`{}` is a built-in function and cannot be rebound", name_tok.text),
-                &name_tok,
-            ));
-        }
         self.expect(Tok::Eq)?;
         let bound = self.parse_expr(0)?;
         let in_tok = self.expect(Tok::Ident)?;

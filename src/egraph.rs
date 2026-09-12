@@ -371,18 +371,29 @@ impl<A: Analysis> EGraph<A> {
         unions
     }
 
-    /// Recompute every class's analysis fact until nothing changes, returning
-    /// the classes whose fact moved.
+    /// Recompute analysis facts until nothing changes, returning the classes
+    /// whose fact moved.
+    ///
+    /// `union` has already merged the two facts into the surviving class, so
+    /// recomputing that class from its nodes will agree with what is stored
+    /// and report no change. Its *parents* still have to hear about it, which
+    /// is why the classes seeded by `union` propagate unconditionally rather
+    /// than only when the recomputation moves them.
     fn propagate_analysis(&mut self) -> Vec<Id> {
+        if self.analysis_pending.is_empty() {
+            return Vec::new();
+        }
+        let mut seeds: Vec<Id> = std::mem::take(&mut self.analysis_pending)
+            .into_iter()
+            .map(|i| self.find_mut(i))
+            .collect();
+        seeds.sort_unstable();
+        seeds.dedup();
+        let mut forced: HashSet<Id> = seeds.iter().copied().collect();
+
+        let mut in_queue: HashSet<Id> = forced.clone();
+        let mut queue: Vec<Id> = seeds;
         let mut changed_any: Vec<Id> = Vec::new();
-        let mut queue: Vec<Id> = if self.analysis_pending.is_empty() {
-            Vec::new()
-        } else {
-            std::mem::take(&mut self.analysis_pending)
-        };
-        let mut in_queue: HashSet<Id> = queue.iter().map(|&i| self.find(i)).collect();
-        queue = in_queue.iter().copied().collect();
-        queue.sort_unstable();
 
         while let Some(id) = queue.pop() {
             let id = self.find_mut(id);
@@ -401,15 +412,20 @@ impl<A: Analysis> EGraph<A> {
                 });
             }
             let Some(new) = acc else { continue };
-            if new != self.class(id).data {
+            let moved = new != self.class(id).data;
+            if moved {
                 self.class_mut(id).data = new;
-                changed_any.push(id);
-                let parents: Vec<Id> = self.class(id).parents.iter().map(|(_, c)| *c).collect();
-                for p in parents {
-                    let p = self.find_mut(p);
-                    if in_queue.insert(p) {
-                        queue.push(p);
-                    }
+            }
+            if !moved && !forced.remove(&id) {
+                continue;
+            }
+            forced.remove(&id);
+            changed_any.push(id);
+            let parents: Vec<Id> = self.class(id).parents.iter().map(|(_, c)| *c).collect();
+            for p in parents {
+                let p = self.find_mut(p);
+                if p != id && in_queue.insert(p) {
+                    queue.push(p);
                 }
             }
         }
