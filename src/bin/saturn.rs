@@ -122,7 +122,7 @@ impl Args {
         ];
         const BOOL_FLAGS: &[&str] = &[
             "help", "version", "stats", "shared", "sexp", "dot", "raw", "wild", "tame", "opt",
-            "quick", "arith", "logic",
+            "quick", "arith", "logic", "why",
         ];
         let known = |name: &str| VALUE_FLAGS.contains(&name) || BOOL_FLAGS.contains(&name);
         let unknown = |name: &str| {
@@ -448,6 +448,15 @@ fn cmd_opt(args: &Args, st: &Style) -> Result<(), String> {
         opts.rules.len(),
         opts.rules_name
     );
+
+    if args.has("why") {
+        // A second saturation, this time with the optimized form present from
+        // the start: an explanation connects the classes two terms began in,
+        // and a term extracted afterwards is already inside the one it would
+        // have to be connected to.
+        let (explanation, explained) = derive(&opts, &expr, &best);
+        show_derivation(st, explanation, &explained, &opts);
+    }
 
     if args.has("stats") {
         println!();
@@ -822,6 +831,111 @@ fn measure(run: &mut dyn FnMut(usize) -> f64, calls: usize) -> f64 {
     best
 }
 
+/// Saturate with both expressions present and explain why they are equal.
+///
+/// The two have to be added *before* saturation: an explanation is a path
+/// between the e-classes two terms started in, and a term extracted after the
+/// fact is already in the class it would have to be connected to.
+fn derive(
+    opts: &Options,
+    a: &RecExpr,
+    b: &RecExpr,
+) -> (Option<saturn::Explanation>, Runner<MathAnalysis>) {
+    let mut runner = Runner::default()
+        .with_explanations()
+        .with_iter_limit(opts.iters)
+        .with_node_limit(opts.nodes)
+        .with_time_limit(opts.time);
+    if opts.backoff {
+        runner = runner.with_scheduler(BackoffScheduler::default());
+    }
+    let runner = runner.with_expr(a).with_expr(b).run(&opts.rules);
+    let explanation = runner.explain_roots(0, 1);
+    (explanation, runner)
+}
+
+fn show_derivation(
+    st: &Style,
+    explanation: Option<saturn::Explanation>,
+    runner: &Runner<MathAnalysis>,
+    opts: &Options,
+) {
+    let Some(explanation) = explanation else {
+        println!();
+        println!(
+            "  {} the `{}` rules do not prove these equal",
+            st.yellow("no"),
+            opts.rules_name
+        );
+        // Saturation is a proof of *in*equality only when it finished; a run
+        // that ran out of budget has simply not looked far enough yet.
+        let hint = match runner.stop_reason {
+            Some(StopReason::Saturated) if opts.rules_name == "all" => {
+                "the rules saturated, so no derivation exists from this set"
+            }
+            Some(StopReason::Saturated) => "the rules saturated; try --rules all",
+            _ => "the run hit a limit; try a larger --iters, --nodes or --time",
+        };
+        println!("  {}", st.dim(hint));
+        return;
+    };
+    let extractor = DagExtractor::new(&runner.egraph, AstSize);
+    let term = |id: saturn::Id| extractor.find_best(id).1.pretty();
+
+    println!();
+    if explanation.is_empty() {
+        // Both were added before anything was unioned, so hashconsing alone
+        // put them in one class: the same term, written two ways.
+        println!(
+            "  {} both are the term {}",
+            st.green("yes"),
+            term(runner.root())
+        );
+        return;
+    }
+    let total = explanation.total_steps();
+    println!(
+        "  {} in {} step{}",
+        st.green("yes"),
+        total,
+        if total == 1 { "" } else { "s" }
+    );
+    let counts = explanation.rule_counts();
+    if !counts.is_empty() {
+        let summary: Vec<String> = counts
+            .iter()
+            .map(|(name, n)| {
+                if *n == 1 {
+                    name.clone()
+                } else {
+                    format!("{} x{}", name, n)
+                }
+            })
+            .collect();
+        println!("  {} {}", st.dim("using"), summary.join(", "));
+    }
+    println!();
+    for line in explanation.render(&term).lines() {
+        println!("  {}", line);
+    }
+}
+
+fn cmd_why(args: &Args, st: &Style) -> Result<bool, String> {
+    if args.positional.len() != 2 {
+        return Err("usage: saturn why '<expression>' '<expression>'".into());
+    }
+    let a = parse(&args.positional[0]).map_err(|e| e.render())?;
+    let b = parse(&args.positional[1]).map_err(|e| e.render())?;
+    let opts = Options::from(args)?;
+
+    show_expr(st, "first", &a, false);
+    show_expr(st, "second", &b, false);
+    let (explanation, runner) = derive(&opts, &a, &b);
+    let proved = explanation.is_some();
+    show_derivation(st, explanation, &runner, &opts);
+    Ok(proved)
+}
+
 fn cmd_emit(args: &Args, _st: &Style) -> Result<(), String> {
     let src = args.expr_arg()?;
     let expr = parse(&src).map_err(|e| e.render())?;
@@ -1120,6 +1234,7 @@ COMMANDS
   opt <expr>            saturate and extract the cheapest equivalent expression
   eval <expr>           evaluate, with -D x=1.5 bindings
   diff <var> <expr>     differentiate symbolically, simplifying as it goes
+  why <expr> <expr>     show the chain of rules that proves the two equal
   check <expr>          compare the optimized form against the original numerically
   emit <expr>           print the optimized expression as C, Rust, or Python
   vm <expr>             compile to bytecode and disassemble
@@ -1141,6 +1256,7 @@ OPTIONS
   --scheduler <s>       backoff | simple                [default: backoff]
   -D name=value         bind a variable (repeatable)
   --shared              print shared subterms as `let` bindings
+  --why                 in `opt`, justify the result with the rules that fired
   --stats, -s           show per-iteration and per-rule statistics
   --samples <n>         inputs to try in `check`        [default: 5000]
   --seed <n>            random seed for `check`         [default: 1447]
@@ -1165,6 +1281,7 @@ EXAMPLES
   saturn vm 'u / w + v / w'
   saturn fuzz --rules safe --count 5000
   saturn emit 'a*x^3 + b*x^2 + c*x + d' --rules all --lang rust --name poly
+  saturn why 'x*y + x*z' 'x*(y + z)' --rules all
 ";
 
 fn main() -> ExitCode {
@@ -1199,6 +1316,7 @@ fn main() -> ExitCode {
         "egraph" | "eg" => cmd_egraph(&args, &st).map(|_| true),
         "vm" | "compile" => cmd_vm(&args, &st).map(|_| true),
         "check" => cmd_check(&args, &st),
+        "why" | "explain" => cmd_why(&args, &st),
         "rules" => cmd_rules(&args, &st).map(|_| true),
         "bench" => cmd_bench(&args, &st).map(|_| true),
         "fuzz" => cmd_fuzz(&args, &st),

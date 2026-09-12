@@ -258,6 +258,6 @@ fn bidirectional_rules_expand_to_two() {
 #[test]
 fn rules_print_readably() {
     let r: Rewrite<MathAnalysis> = rw!("mul-1"; "?a * 1" => "?a");
-    assert_eq!(r.long_name(), "(?a * 1) => ?a");
+    assert_eq!(r.long_name(), "?a * 1 => ?a");
     assert!(r.to_string().starts_with("mul-1:"));
 }

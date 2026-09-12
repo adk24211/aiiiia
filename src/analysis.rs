@@ -196,6 +196,6 @@ impl Analysis for MathAnalysis {
             return;
         }
         let lit = egraph.add(ENode::leaf(Op::Const(c)));
-        egraph.union(id, lit);
+        egraph.union_because(id, lit, crate::explain::Justification::Fold);
     }
 }

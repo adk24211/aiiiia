@@ -8,11 +8,13 @@
 
 use crate::analysis::Analysis;
 use crate::egraph::EGraph;
+use crate::explain::{Explanation, Justification, RuleLabel};
 use crate::lang::{Id, RecExpr};
 use crate::pattern::SearchMatches;
 use crate::rewrite::Rewrite;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Why the runner stopped.
@@ -292,6 +294,19 @@ impl<A: Analysis> Runner<A> {
         self
     }
 
+    /// Record why each union happened, so the run can be asked to justify an
+    /// equality afterwards. See [`EGraph::explain`].
+    pub fn with_explanations(mut self) -> Self {
+        self.egraph.enable_explanations();
+        self
+    }
+
+    /// A derivation connecting two of the runner's root expressions.
+    pub fn explain_roots(&self, a: usize, b: usize) -> Option<Explanation> {
+        self.egraph
+            .explain(*self.roots.get(a)?, *self.roots.get(b)?)
+    }
+
     /// The canonical id of the first root, after saturation.
     pub fn root(&self) -> Id {
         self.egraph
@@ -333,6 +348,21 @@ impl<A: Analysis> Runner<A> {
     /// returns is actually spending its time.
     pub fn run(mut self, rules: &[Rewrite<A>]) -> Self {
         let trace = std::env::var_os("SATURN_TRACE").is_some();
+        // One label per rule rather than one per match: an explanation names
+        // thousands of steps and they nearly all point at the same handful of
+        // rules.
+        let labels: Option<Vec<Arc<RuleLabel>>> = self.egraph.explanations_enabled().then(|| {
+            rules
+                .iter()
+                .map(|r| {
+                    Arc::new(RuleLabel {
+                        name: r.name.clone(),
+                        lhs: r.searcher.to_string(),
+                        rhs: r.applier.describe(),
+                    })
+                })
+                .collect()
+        });
         self.start = Some(Instant::now());
         self.egraph.rebuild();
 
@@ -390,10 +420,17 @@ impl<A: Analysis> Runner<A> {
             let mut unions = 0;
             for (ri, ms) in &found {
                 let rule = &rules[*ri];
+                let label = labels.as_ref().map(|l| l[*ri].clone());
                 let mut n = 0;
                 let mut since_check = 0usize;
                 'matches: for m in ms {
                     for subst in &m.substs {
+                        if let Some(label) = &label {
+                            self.egraph.justify(Justification::Rule {
+                                rule: label.clone(),
+                                subst: subst.clone(),
+                            });
+                        }
                         n += rule.applier.apply(&mut self.egraph, m.eclass, subst).len();
                         since_check += 1;
                         // Applying a single rule's matches can itself outlast

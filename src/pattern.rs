@@ -442,34 +442,51 @@ impl Pattern {
         expr.compact(ids[self.root()])
     }
 
-    /// Build a standalone expression from this pattern and a map from variable
-    /// name to expression. Used by the rule pretty-printer and tests.
+    /// The pattern as source text, with minimal parentheses.
     pub fn to_string_pretty(&self) -> String {
-        self.write(self.root())
+        self.write(self.root(), 0)
     }
 
-    fn write(&self, i: usize) -> String {
-        match &self.nodes[i] {
-            PatNode::Var(v) => v.to_string(),
-            PatNode::Op(Op::Const(c), _) => c.to_string(),
-            PatNode::Op(Op::Var(s), _) => s.to_string(),
-            PatNode::Op(op, cs) if op.is_infix() => {
-                format!(
-                    "({} {} {})",
-                    self.write(cs[0]),
-                    op.name(),
-                    self.write(cs[1])
-                )
+    /// Print the way the expression printer does, so a rule quoted in an
+    /// explanation reads as it was written rather than fully bracketed.
+    fn write(&self, i: usize, parent_prec: u8) -> String {
+        let (text, prec) = match &self.nodes[i] {
+            PatNode::Var(v) => (v.to_string(), 10),
+            PatNode::Op(Op::Const(c), _) => {
+                // A negative literal needs brackets in an operand position, or
+                // `2 ^ -1` reads back as a subtraction.
+                (c.to_string(), if c.get() < 0.0 { 0 } else { 10 })
             }
-            PatNode::Op(op, cs) if cs.is_empty() => op.name().to_string(),
-            PatNode::Op(op, cs) => format!(
-                "{}({})",
-                op.name(),
-                cs.iter()
-                    .map(|&c| self.write(c))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            PatNode::Op(Op::Var(s), _) => (s.to_string(), 10),
+            PatNode::Op(op, cs) if matches!(op, Op::Neg | Op::Not) => {
+                let sign = if *op == Op::Neg { "-" } else { "!" };
+                (format!("{}{}", sign, self.write(cs[0], 7)), 7)
+            }
+            PatNode::Op(op, cs) if op.is_infix() => {
+                let prec = op.precedence();
+                let (lp, rp) = if op.is_right_assoc() {
+                    (prec + 1, prec)
+                } else {
+                    (prec, prec + 1)
+                };
+                let text = format!(
+                    "{} {} {}",
+                    self.write(cs[0], lp),
+                    op.name(),
+                    self.write(cs[1], rp)
+                );
+                (text, prec)
+            }
+            PatNode::Op(op, cs) if cs.is_empty() => (op.name().to_string(), 10),
+            PatNode::Op(op, cs) => {
+                let args: Vec<String> = cs.iter().map(|&c| self.write(c, 0)).collect();
+                (format!("{}({})", op.name(), args.join(", ")), 10)
+            }
+        };
+        if prec < parent_prec {
+            format!("({})", text)
+        } else {
+            text
         }
     }
 }

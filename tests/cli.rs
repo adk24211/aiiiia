@@ -245,3 +245,53 @@ fn a_misspelled_flag_suggests_the_right_one() {
     assert!(fails(&["opt", "x", "--xyzzy"]).contains("saturn --help"));
     assert!(fails(&["opt", "x", "--rules"]).contains("needs a value"));
 }
+
+#[test]
+fn why_proves_an_equality() {
+    let out = stdout(&["why", "x * y + x * z", "x * (y + z)", "--rules", "all"]);
+    assert!(out.contains("yes"), "{}", out);
+    assert!(out.contains("distribute"), "{}", out);
+    assert!(out.contains("?a = x"), "{}", out);
+}
+
+#[test]
+fn why_unfolds_a_congruence_into_its_arguments() {
+    let out = stdout(&[
+        "why",
+        "(a * b) * c + 1",
+        "a * (b * c) + 1",
+        "--rules",
+        "all",
+    ]);
+    assert!(out.contains("congruence"), "{}", out);
+    assert!(out.contains("argument"), "{}", out);
+    assert!(out.contains("assoc-mul"), "{}", out);
+}
+
+#[test]
+fn why_fails_when_it_cannot_prove_it() {
+    let out = saturn(&["why", "x + 1", "x + 2", "--rules", "all"]);
+    assert!(!out.status.success(), "an unprovable claim must not exit 0");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("do not prove these equal"), "{}", text);
+    // Saturation finished, so this really is a negative answer rather than a
+    // budget that ran out; the hint should say which.
+    assert!(text.contains("no derivation exists"), "{}", text);
+}
+
+#[test]
+fn why_needs_exactly_two_expressions() {
+    assert!(fails(&["why", "x"]).contains("usage"));
+    assert!(fails(&["why", "x", "y", "z"]).contains("usage"));
+}
+
+#[test]
+fn opt_can_justify_its_own_result() {
+    let out = stdout(&["opt", "u / w + v / w", "--rules", "all", "--why"]);
+    assert!(out.contains("(u + v) / w"), "{}", out);
+    assert!(
+        out.contains("split-div") || out.contains("join-div"),
+        "{}",
+        out
+    );
+}

@@ -13,6 +13,7 @@
 //! `rebuild`, which is dramatically cheaper than restoring them eagerly.
 
 use crate::analysis::Analysis;
+use crate::explain::{Explanation, Justification, Step};
 use crate::lang::{ENode, Id, Op, RecExpr};
 use crate::unionfind::UnionFind;
 use std::collections::{HashMap, HashSet};
@@ -26,6 +27,14 @@ const MAX_REBUILD_ROUNDS: usize = 100;
 /// Class recomputations one analysis pass may perform, as a multiple of the
 /// number of classes plus a constant floor for small graphs.
 const ANALYSIS_POPS_PER_CLASS: usize = 32;
+
+/// How far a derivation will unfold a congruence into its arguments.
+///
+/// Each level explains why one argument of an operator is equal to another,
+/// and those arguments are usually congruent in turn. Without a bound a proof
+/// would follow the expression all the way to its leaves, which is more than
+/// anyone reads.
+const MAX_EXPLAIN_DEPTH: usize = 6;
 
 /// A set of e-nodes known to be equivalent, plus the analysis fact that holds
 /// for the value they all denote.
@@ -83,6 +92,12 @@ pub struct EGraph<A: Analysis> {
     /// pair of rules, so these must not cost a scan of the whole graph.
     node_count: usize,
     class_count: usize,
+    /// Every union performed, with its reason. `None` unless explanations were
+    /// asked for: the list grows with the number of unions, which is much
+    /// larger than the number of classes.
+    history: Option<Vec<(Id, Id, Justification)>>,
+    /// The reason the next union will record.
+    reason: Justification,
     clean: bool,
 }
 
@@ -103,8 +118,42 @@ impl<A: Analysis> EGraph<A> {
             analysis_pending: Vec::new(),
             node_count: 0,
             class_count: 0,
+            history: None,
+            reason: Justification::Asserted,
             clean: true,
         }
+    }
+
+    /// Record why each union happened, so [`EGraph::explain`] can answer.
+    ///
+    /// Off by default: the record grows with the number of unions, which on a
+    /// saturating run is far larger than the number of e-classes.
+    pub fn enable_explanations(&mut self) {
+        if self.history.is_none() {
+            self.history = Some(Vec::new());
+        }
+    }
+
+    pub fn explanations_enabled(&self) -> bool {
+        self.history.is_some()
+    }
+
+    /// Set the reason the following unions will record.
+    ///
+    /// The saturation loop calls this before handing a match to an applier,
+    /// because an applier reaches `union` through whatever structure it likes
+    /// and threading a justification through every one of them would put the
+    /// bookkeeping in the way of the interesting code.
+    pub fn justify(&mut self, reason: Justification) {
+        self.reason = reason;
+    }
+
+    /// Union `a` and `b` for one specific reason, restoring the previous one.
+    pub fn union_because(&mut self, a: Id, b: Id, reason: Justification) -> bool {
+        let previous = std::mem::replace(&mut self.reason, reason);
+        let changed = self.union(a, b);
+        self.reason = previous;
+        changed
     }
 
     // -- queries ------------------------------------------------------------
@@ -239,7 +288,13 @@ impl<A: Analysis> EGraph<A> {
         self.memo.insert(node, id);
         self.node_count += 1;
         self.class_count += 1;
-        A::modify(self, id);
+        // The analysis runs at the next rebuild rather than here. Acting on a
+        // half-built graph is the lesser reason; the greater one is that a
+        // fold performed inside `add` would union the class with its literal
+        // before the caller ever holds a handle to either, leaving nothing for
+        // an explanation to connect.
+        self.analysis_pending.push(id);
+        self.clean = false;
         self.find(id)
     }
 
@@ -303,7 +358,117 @@ impl<A: Analysis> EGraph<A> {
         }
         self.class_count -= 1;
         self.clean = false;
+        if let Some(history) = self.history.as_mut() {
+            // The ids as they were *before* the merge: connectivity in this
+            // edge list is exactly union-find connectivity, so a path between
+            // two ids here is a derivation of their equality.
+            history.push((a, b, self.reason.clone()));
+        }
         true
+    }
+
+    /// A chain of justified steps connecting `a` and `b`, if they are equal.
+    ///
+    /// Returns an empty explanation when the two are already the same class
+    /// without any union having joined them — they are literally the same
+    /// term. Returns `None` when they are not equal, or when explanations were
+    /// never enabled.
+    ///
+    /// The chain is the shortest one in number of steps, which is a decent
+    /// proxy for the shortest proof and is what a breadth-first walk gives for
+    /// free.
+    pub fn explain(&self, a: Id, b: Id) -> Option<Explanation> {
+        self.explain_within(a, b, MAX_EXPLAIN_DEPTH, &mut Vec::new())
+    }
+
+    /// A step of [`EGraph::explain`], bounded so that a congruence whose
+    /// arguments are themselves congruent cannot unfold forever.
+    fn explain_within(
+        &self,
+        a: Id,
+        b: Id,
+        depth: usize,
+        on_stack: &mut Vec<(Id, Id)>,
+    ) -> Option<Explanation> {
+        let history = self.history.as_ref()?;
+        if self.find(a) != self.find(b) {
+            return None;
+        }
+        if a == b {
+            return Some(Explanation::default());
+        }
+        let key = if a <= b { (a, b) } else { (b, a) };
+        if depth == 0 || on_stack.contains(&key) {
+            return Some(Explanation::default());
+        }
+        on_stack.push(key);
+
+        let mut adjacency: HashMap<Id, Vec<usize>> = HashMap::new();
+        for (i, (x, y, _)) in history.iter().enumerate() {
+            adjacency.entry(*x).or_default().push(i);
+            adjacency.entry(*y).or_default().push(i);
+        }
+
+        // Breadth-first from `a`, recording the edge each id was reached by.
+        let mut came_from: HashMap<Id, (Id, usize)> = HashMap::new();
+        let mut queue = std::collections::VecDeque::from([a]);
+        let mut seen: HashSet<Id> = HashSet::from([a]);
+        while let Some(current) = queue.pop_front() {
+            if current == b {
+                break;
+            }
+            for &edge in adjacency.get(&current).into_iter().flatten() {
+                let (x, y, _) = &history[edge];
+                let next = if *x == current { *y } else { *x };
+                if seen.insert(next) {
+                    came_from.insert(next, (current, edge));
+                    queue.push_back(next);
+                }
+            }
+        }
+        if !seen.contains(&b) {
+            // `a` and `b` are in one class, so some chain of unions joined
+            // them; not finding it would mean the history is incomplete.
+            on_stack.pop();
+            return None;
+        }
+
+        let mut path = Vec::new();
+        let mut at = b;
+        while at != a {
+            let (previous, edge) = came_from[&at];
+            path.push((previous, at, history[edge].2.clone()));
+            at = previous;
+        }
+        path.reverse();
+
+        let mut steps = Vec::with_capacity(path.len());
+        for (from, to, reason) in path {
+            // A congruence says "same operator, equivalent arguments" and is
+            // no explanation at all until the arguments are explained too.
+            let because = match &reason {
+                Justification::Congruence { left, right } => self
+                    .pair_arguments(left, right)
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(_, (x, y))| x != y)
+                    .filter_map(|(i, (x, y))| {
+                        self.explain_within(x, y, depth - 1, on_stack)
+                            .filter(|e| !e.is_empty())
+                            .map(|e| (i, e))
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            steps.push(Step {
+                justification: reason,
+                from,
+                to,
+                because,
+            });
+        }
+        on_stack.pop();
+        Some(Explanation { steps })
     }
 
     /// Union the classes of two expressions, returning whether anything changed.
@@ -386,30 +551,74 @@ impl<A: Analysis> EGraph<A> {
         // congruent. Whichever survives, the memo entry is passed through
         // `find` on lookup, so either value is correct.
         let mut unions = 0;
-        let mut seen: HashMap<ENode, Id> = HashMap::with_capacity(parents.len());
-        for (node, owner) in parents {
-            let node = self.canonicalize(&node);
+        // Keyed by the canonical form, but the *stored* form is kept beside
+        // it: an explanation of a congruence has to name the two nodes as they
+        // were, since their children are what the derivation continues into.
+        let mut seen: HashMap<ENode, (Id, ENode)> = HashMap::with_capacity(parents.len());
+        for (stored, owner) in parents {
+            let node = self.canonicalize(&stored);
             let owner = self.find_mut(owner);
             match seen.get(&node) {
-                Some(&existing) => {
-                    if self.union(existing, owner) {
+                Some((existing, other)) => {
+                    let (existing, other) = (*existing, other.clone());
+                    let reason = Justification::Congruence {
+                        left: other,
+                        right: stored,
+                    };
+                    if self.union_because(existing, owner, reason) {
                         unions += 1;
                     }
                     let root = self.find_mut(owner);
-                    seen.insert(node.clone(), root);
+                    let (_, keep) = seen.remove(&node).expect("just looked it up");
+                    seen.insert(node.clone(), (root, keep));
                     self.memo.insert(node, root);
                 }
                 None => {
-                    seen.insert(node.clone(), owner);
+                    seen.insert(node.clone(), (owner, stored));
                     self.memo.insert(node, owner);
                 }
             }
         }
 
         let root = self.find_mut(id);
-        let new_parents: Vec<(ENode, Id)> = seen.into_iter().collect();
+        let new_parents: Vec<(ENode, Id)> = seen
+            .into_iter()
+            .map(|(node, (owner, _))| (node, owner))
+            .collect();
         self.class_mut(root).parents.extend(new_parents);
         unions
+    }
+
+    /// Match up the arguments of two congruent e-nodes.
+    ///
+    /// Position is the wrong key for a commutative operator: its children are
+    /// stored in a canonical order, so two congruent nodes routinely differ by
+    /// a swap. Pairing by position would then compare arguments that are not
+    /// equal at all, find no derivation, and report that a congruence needed
+    /// no explanation — hiding exactly the work the reader is asking about.
+    fn pair_arguments(&self, left: &ENode, right: &ENode) -> Vec<(Id, Id)> {
+        let straight: Vec<(Id, Id)> = left
+            .children
+            .iter()
+            .copied()
+            .zip(right.children.iter().copied())
+            .collect();
+        if !left.op.is_commutative() || left.children.len() != 2 {
+            return straight;
+        }
+        let agrees = |pairs: &[(Id, Id)]| pairs.iter().all(|(x, y)| self.find(*x) == self.find(*y));
+        if agrees(&straight) {
+            return straight;
+        }
+        let swapped = vec![
+            (left.children[0], right.children[1]),
+            (left.children[1], right.children[0]),
+        ];
+        if agrees(&swapped) {
+            swapped
+        } else {
+            straight
+        }
     }
 
     /// Recompute analysis facts until nothing changes, returning the classes
