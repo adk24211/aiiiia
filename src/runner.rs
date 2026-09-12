@@ -120,6 +120,7 @@ pub struct BackoffScheduler {
     default_ban_length: usize,
     stats: BTreeMap<String, RuleStats>,
     banned_this_iter: Vec<String>,
+    current_iteration: usize,
 }
 
 impl Default for BackoffScheduler {
@@ -129,6 +130,7 @@ impl Default for BackoffScheduler {
             default_ban_length: 5,
             stats: BTreeMap::new(),
             banned_this_iter: Vec::new(),
+            current_iteration: usize::MAX,
         }
     }
 }
@@ -162,7 +164,10 @@ impl<A: Analysis> RuleScheduler<A> for BackoffScheduler {
         egraph: &EGraph<A>,
         rule: &Rewrite<A>,
     ) -> Vec<SearchMatches> {
-        if iteration == 0 {
+        // `search` is called once per rule, so the first call of a new
+        // iteration is where the previous iteration's ban list is dropped.
+        if self.current_iteration != iteration {
+            self.current_iteration = iteration;
             self.banned_this_iter.clear();
         }
         {
@@ -247,7 +252,11 @@ impl<A: Analysis> Runner<A> {
             iter_limit: 30,
             node_limit: 100_000,
             time_limit: Duration::from_secs(10),
-            scheduler: Box::new(SimpleScheduler),
+            // Backoff by default: a handful of rules that match explosively
+            // (association, distribution) will otherwise consume the whole
+            // node budget before the rules that actually shrink the expression
+            // get a chance to run.
+            scheduler: Box::new(BackoffScheduler::default()),
             start: None,
         }
     }

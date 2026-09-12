@@ -27,7 +27,9 @@
 #![forbid(unsafe_code)]
 
 pub mod analysis;
+pub mod check;
 pub mod egraph;
+pub mod eval;
 pub mod extract;
 pub mod interval;
 pub mod lang;
@@ -35,12 +37,19 @@ pub mod lexer;
 pub mod parser;
 pub mod pattern;
 pub mod rewrite;
+pub mod rng;
+pub mod rules;
 pub mod runner;
 pub mod sym;
 pub mod unionfind;
+pub mod vm;
 
 pub use analysis::{Analysis, MathAnalysis, MathData, NoAnalysis};
 pub use egraph::{EClass, EGraph, EGraphStats};
+pub use eval::{eval, eval_at, Env, EvalError};
+pub use rng::Rng;
+pub use check::{Checker, Report};
+pub use vm::{Instr, Program};
 pub use extract::{AstDepth, AstSize, CostFunction, DagExtractor, Extractor, OpCost};
 pub use interval::Interval;
 pub use lang::{ENode, Id, Op, RecExpr};

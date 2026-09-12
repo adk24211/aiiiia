@@ -537,25 +537,34 @@ impl<A: Analysis> EGraph<A> {
             );
         }
 
-        // Parent lists are complete: every node is recorded in each child's
-        // class.
+        // Parent lists are exactly the set of (node, owner) pairs implied by
+        // the classes. A linear scan per node would be quadratic on a large
+        // graph, so compare the two sets directly.
+        let mut expected: HashSet<(Id, ENode, Id)> = HashSet::new();
         for class in self.classes() {
             for n in &class.nodes {
                 for &child in &n.children {
-                    let cc = self.find(child);
-                    let listed = self.classes[cc.index()]
-                        .as_ref()
-                        .expect("child class")
-                        .parents
-                        .iter()
-                        .any(|(pn, pc)| pn == n && self.find(*pc) == class.id);
-                    assert!(
-                        listed,
-                        "class {:?} is missing parent {:?} from class {:?}",
-                        cc, n, class.id
-                    );
+                    expected.insert((self.find(child), n.clone(), class.id));
                 }
             }
+        }
+        let mut actual: HashSet<(Id, ENode, Id)> = HashSet::new();
+        for class in self.classes() {
+            for (n, owner) in &class.parents {
+                actual.insert((class.id, n.clone(), self.find(*owner)));
+            }
+        }
+        if let Some(missing) = expected.difference(&actual).next() {
+            panic!(
+                "class {:?} is missing parent {:?} from class {:?}",
+                missing.0, missing.1, missing.2
+            );
+        }
+        if let Some(extra) = actual.difference(&expected).next() {
+            panic!(
+                "class {:?} lists a stale parent {:?} from class {:?}",
+                extra.0, extra.1, extra.2
+            );
         }
     }
 

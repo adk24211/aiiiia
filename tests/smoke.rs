@@ -13,6 +13,17 @@ fn rules() -> Vec<Rewrite<MathAnalysis>> {
     ]
 }
 
+/// These tests run in debug builds, where the engine is roughly fifty times
+/// slower than release. Bounding the work keeps the suite quick without
+/// changing what any of them prove.
+fn small_runner(e: &RecExpr) -> Runner<MathAnalysis> {
+    Runner::default()
+        .with_expr(e)
+        .with_iter_limit(10)
+        .with_node_limit(5_000)
+        .with_time_limit(std::time::Duration::from_secs(5))
+}
+
 #[test]
 fn parses_and_prints() {
     let e = parse("2 * x + 1").unwrap();
@@ -28,7 +39,7 @@ fn egraph_invariants_hold() {
     eg.rebuild();
     eg.check_invariants();
 
-    let r = Runner::default().with_expr(&e).with_iter_limit(6).run(&rules());
+    let r = small_runner(&e).with_iter_limit(6).run(&rules());
     r.egraph.check_invariants();
     assert!(r.egraph.number_of_classes() > 0);
     let _ = root;
@@ -49,7 +60,7 @@ fn constant_folding_works() {
 #[test]
 fn saturation_simplifies() {
     let e = parse("x * (1 + 0) * 1").unwrap();
-    let r = Runner::default().with_expr(&e).run(&rules());
+    let r = small_runner(&e).run(&rules());
     let (cost, best) = Extractor::new(&r.egraph, AstSize).find_best(r.root());
     assert_eq!(best.to_sexp(), "x", "got {} at cost {}", best.to_sexp(), cost);
 }
@@ -59,7 +70,7 @@ fn factoring_is_found() {
     // Only reachable if the rules can run *backwards* through distribution,
     // which is the whole point of saturating instead of rewriting in place.
     let e = parse("x * y + x * z").unwrap();
-    let r = Runner::default().with_expr(&e).run(&rules());
+    let r = small_runner(&e).run(&rules());
     let (_, best) = Extractor::new(&r.egraph, OpCost).find_best(r.root());
     assert_eq!(best.to_sexp(), "(* x (+ y z))", "got {}", best.pretty());
 }
