@@ -3,11 +3,12 @@
 **Equality saturation for a small numeric language.** An optimizer that does
 not have to guess which rewrite to apply, because it applies all of them.
 
-Zero dependencies. Rust 1.74+. Library and CLI.
+Zero dependencies, Rust 1.86+, library and CLI. ~11k lines, 228 tests.
 
 ```
-cargo run -- opt 'u / w + v / w'
+cargo run -- opt 'a*x^3 + b*x^2 + c*x + d' --rules all
 cargo run -- diff x 'exp(sin(x * x))'
+cargo run -- emit 'u / w + v / w' --rules all --lang rust
 cargo run -- fuzz --rules safe --count 5000
 ```
 
@@ -29,11 +30,12 @@ containing every program the rules can reach, exponentially many of them in
 polynomial space. Only then do you pick one, with a cost model and full
 knowledge of the alternatives.
 
-`saturn` implements that from first principles: e-graph with congruence
+`saturn` implements that from first principles: an e-graph with congruence
 closure and deferred rebuilding, e-matching, an interval-based e-class
-analysis that discharges side conditions, a backoff rule scheduler, optimal
-cost extraction, a symbolic differentiator written entirely as rewrite rules,
-and a bytecode compiler for the result.
+analysis that discharges the side conditions float rewriting needs, a backoff
+rule scheduler, cost extraction, a symbolic differentiator written entirely as
+rewrite rules, a bytecode compiler, and a code emitter whose output is
+compiled and checked against the interpreter bit for bit.
 
 `docs/design.md` is the full tour.
 
