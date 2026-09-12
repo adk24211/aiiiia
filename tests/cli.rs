@@ -295,3 +295,35 @@ fn opt_can_justify_its_own_result() {
         out
     );
 }
+
+#[test]
+fn assumptions_unlock_guarded_rules() {
+    // Without a fact `w` could be zero, infinite or NaN, so nothing cancels.
+    let plain = stdout(&["opt", "w / w * x"]);
+    assert!(plain.contains("unchanged"), "{}", plain);
+
+    let assumed = stdout(&["opt", "w / w * x", "--assume", "finite(w) && nonzero(w)"]);
+    assert!(assumed.contains("cheaper"), "{}", assumed);
+    assert!(assumed.contains("optimized x"), "{}", assumed);
+}
+
+#[test]
+fn assumptions_accumulate_across_flags() {
+    let out = stdout(&[
+        "opt",
+        "abs(x)",
+        "--assume",
+        "x >= 0",
+        "--assume",
+        "nonzero(x)",
+    ]);
+    assert!(out.contains("optimized x"), "{}", out);
+}
+
+#[test]
+fn a_malformed_assumption_is_rejected() {
+    let err = fails(&["opt", "x", "--assume", "x >"]);
+    assert!(err.contains("parse error"), "{}", err);
+    assert!(err.contains('^'), "{}", err);
+    assert!(fails(&["opt", "x", "--assume", "x != 5"]).contains("against 0"));
+}

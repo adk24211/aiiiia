@@ -223,6 +223,7 @@ mod tests {
         let expr = parse(src).unwrap();
         let runner = Runner::new(MathAnalysis {
             fold_transcendental,
+            ..MathAnalysis::default()
         })
         .with_iter_limit(15)
         .with_node_limit(20_000)

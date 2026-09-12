@@ -6,6 +6,7 @@
 //! when a class's fact changes — constant folding uses it to union a class
 //! with the literal it was proven equal to.
 
+use crate::assume::Assumptions;
 use crate::egraph::EGraph;
 use crate::interval::Interval;
 use crate::lang::{ENode, Id, Op};
@@ -78,15 +79,29 @@ impl Default for MathData {
 /// friends are evaluated at compile time. They are correctly rounded on most
 /// platforms but not required to be, so a build that must reproduce the
 /// runtime's results bit for bit can turn them off.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct MathAnalysis {
     pub fold_transcendental: bool,
+    /// What the caller has told us about each variable. See
+    /// [`crate::assume`]; these are taken on trust.
+    pub assumptions: Assumptions,
 }
 
 impl Default for MathAnalysis {
     fn default() -> MathAnalysis {
         MathAnalysis {
             fold_transcendental: true,
+            assumptions: Assumptions::new(),
+        }
+    }
+}
+
+impl MathAnalysis {
+    /// An analysis that starts from the caller's facts about the variables.
+    pub fn assuming(assumptions: Assumptions) -> MathAnalysis {
+        MathAnalysis {
+            assumptions,
+            ..MathAnalysis::default()
         }
     }
 }
@@ -128,7 +143,17 @@ impl Analysis for MathAnalysis {
         // -- interval --------------------------------------------------------
         let range = match node.op {
             Op::Const(c) => Interval::point(c.get()),
-            Op::Var(_) => Interval::TOP,
+            // A variable knows nothing about itself, unless the caller said
+            // otherwise. This is the only place an assumption enters, and it
+            // has to be here rather than written into the class once: the
+            // analysis recomputes a class from its nodes whenever anything
+            // below it changes, and would overwrite anything else.
+            Op::Var(s) => egraph
+                .analysis
+                .assumptions
+                .get(&s)
+                .copied()
+                .unwrap_or(Interval::TOP),
             Op::Add => child(0).range.add(child(1).range),
             Op::Sub => child(0).range.sub(child(1).range),
             Op::Mul => child(0).range.mul(child(1).range),
@@ -140,6 +165,7 @@ impl Analysis for MathAnalysis {
                 lo: -std::f64::consts::PI,
                 hi: std::f64::consts::PI,
                 nan: child(0).range.nan || child(1).range.nan,
+                nonzero: false,
             },
             Op::Neg => child(0).range.neg(),
             Op::Sqrt => child(0).range.sqrt(),

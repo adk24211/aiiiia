@@ -18,6 +18,14 @@ pub struct Interval {
     pub hi: f64,
     /// The value may be NaN. When this is false, the bounds are meaningful.
     pub nan: bool,
+    /// The value is known not to be zero.
+    ///
+    /// An interval cannot say "anything but zero" — that is a hole in the
+    /// middle of a range, and this domain has no holes. The fact matters often
+    /// enough to carry as its own bit: it is exactly what `?x / ?x => 1`
+    /// needs, and a caller who knows a divisor is non-zero has no other way to
+    /// say so.
+    pub nonzero: bool,
 }
 
 /// Compare two bounds reflexively.
@@ -34,7 +42,10 @@ fn same_bound(a: f64, b: f64) -> bool {
 
 impl PartialEq for Interval {
     fn eq(&self, other: &Interval) -> bool {
-        same_bound(self.lo, other.lo) && same_bound(self.hi, other.hi) && self.nan == other.nan
+        same_bound(self.lo, other.lo)
+            && same_bound(self.hi, other.hi)
+            && self.nan == other.nan
+            && self.nonzero == other.nonzero
     }
 }
 
@@ -64,6 +75,7 @@ impl Interval {
         lo: f64::NEG_INFINITY,
         hi: f64::INFINITY,
         nan: true,
+        nonzero: false,
     };
 
     /// Any real value, but definitely not NaN.
@@ -71,6 +83,7 @@ impl Interval {
         lo: f64::NEG_INFINITY,
         hi: f64::INFINITY,
         nan: false,
+        nonzero: false,
     };
 
     pub fn new(lo: f64, hi: f64) -> Interval {
@@ -79,7 +92,14 @@ impl Interval {
             lo: lo.min(hi),
             hi: hi.max(lo),
             nan: false,
+            nonzero: false,
         }
+    }
+
+    /// The same range, additionally known not to be zero.
+    pub fn nonzero(mut self) -> Interval {
+        self.nonzero = true;
+        self
     }
 
     /// The abstraction of a single concrete value.
@@ -89,12 +109,14 @@ impl Interval {
                 lo: f64::INFINITY,
                 hi: f64::NEG_INFINITY,
                 nan: true,
+                nonzero: false,
             }
         } else {
             Interval {
                 lo: x,
                 hi: x,
                 nan: false,
+                nonzero: x != 0.0,
             }
         }
     }
@@ -117,13 +139,13 @@ impl Interval {
     }
     /// Provably not zero (and not NaN).
     pub fn is_nonzero(&self) -> bool {
-        !self.nan && (self.lo > 0.0 || self.hi < 0.0)
+        !self.nan && (self.lo > 0.0 || self.hi < 0.0 || self.nonzero)
     }
     pub fn is_positive(&self) -> bool {
-        !self.nan && self.lo > 0.0
+        !self.nan && (self.lo > 0.0 || (self.lo >= 0.0 && self.nonzero))
     }
     pub fn is_negative(&self) -> bool {
-        !self.nan && self.hi < 0.0
+        !self.nan && (self.hi < 0.0 || (self.hi <= 0.0 && self.nonzero))
     }
     /// Provably `>= 0` and not NaN. Note that `-0.0 >= 0.0`, so this admits a
     /// negative zero; a rule whose correctness turns on the sign of a zero
@@ -162,6 +184,9 @@ impl Interval {
         let lo = self.lo.max(other.lo);
         let hi = self.hi.min(other.hi);
         let nan = self.nan && other.nan;
+        // Both describe the same value, so either side knowing it is non-zero
+        // settles it.
+        let nonzero = self.nonzero || other.nonzero;
         if lo > hi {
             // The two facts disagree about the reals, which can only happen if
             // an unsound rule merged two classes that are not equal. Recover
@@ -174,7 +199,12 @@ impl Interval {
             // it to jump to next.
             return Interval::TOP;
         }
-        Interval { lo, hi, nan }
+        Interval {
+            lo,
+            hi,
+            nan,
+            nonzero,
+        }
     }
 
     /// Cover both possibilities — used where a value is one of two things.
@@ -183,6 +213,7 @@ impl Interval {
             lo: self.lo.min(other.lo),
             hi: self.hi.max(other.hi),
             nan: self.nan || other.nan,
+            nonzero: self.nonzero && other.nonzero,
         }
     }
 
@@ -214,6 +245,8 @@ impl Interval {
             lo: if lo.is_nan() { f64::NEG_INFINITY } else { lo },
             hi: if hi.is_nan() { f64::INFINITY } else { hi },
             nan,
+            // Two non-zero values can sum to zero.
+            nonzero: false,
         }
     }
 
@@ -231,6 +264,8 @@ impl Interval {
             lo: -self.hi,
             hi: -self.lo,
             nan: self.nan,
+            // Negation cannot turn a non-zero into a zero.
+            nonzero: self.nonzero,
         }
     }
 
@@ -261,6 +296,8 @@ impl Interval {
             lo: widen_lo(lo),
             hi: widen_hi(hi),
             nan,
+            // Two non-zero values can multiply to zero by underflow.
+            nonzero: false,
         }
     }
 
@@ -295,6 +332,8 @@ impl Interval {
             lo: widen_lo(lo),
             hi: widen_hi(hi),
             nan,
+            // A non-zero quotient can still underflow to zero.
+            nonzero: false,
         }
     }
 
@@ -312,6 +351,7 @@ impl Interval {
             lo,
             hi,
             nan: self.nan,
+            nonzero: self.nonzero,
         }
     }
 
@@ -327,6 +367,9 @@ impl Interval {
             lo: widen_lo(lo).max(0.0),
             hi: widen_hi(hi),
             nan,
+            // The square root of a non-zero is non-zero: the only input that
+            // maps to zero is zero itself.
+            nonzero: self.nonzero,
         }
     }
 
@@ -338,6 +381,9 @@ impl Interval {
             lo: widen_lo(self.lo.exp()).max(0.0),
             hi: widen_hi(self.hi.exp()),
             nan: self.nan,
+            // `exp` is positive over the reals but underflows to zero for a
+            // large enough negative argument, so the bound says it, not a flag.
+            nonzero: false,
         }
     }
 
@@ -356,7 +402,12 @@ impl Interval {
         } else {
             widen_hi(self.hi.ln())
         };
-        Interval { lo, hi, nan }
+        Interval {
+            lo,
+            hi,
+            nan,
+            nonzero: false,
+        }
     }
 
     /// `sin` and `cos` land in `[-1, 1]`, and are NaN exactly on non-finite
@@ -368,6 +419,7 @@ impl Interval {
             lo: -1.0,
             hi: 1.0,
             nan,
+            nonzero: false,
         }
     }
 
@@ -378,6 +430,9 @@ impl Interval {
             lo: self.lo.min(o.lo),
             hi: self.hi.min(o.hi),
             nan: self.nan && o.nan,
+            // The smaller of two non-zero values can still be zero only if one
+            // of them was, so both sides knowing it settles it.
+            nonzero: self.nonzero && o.nonzero,
         }
     }
 
@@ -386,6 +441,7 @@ impl Interval {
             lo: self.lo.max(o.lo),
             hi: self.hi.max(o.hi),
             nan: self.nan && o.nan,
+            nonzero: self.nonzero && o.nonzero,
         }
     }
 
@@ -394,6 +450,8 @@ impl Interval {
             lo: self.lo.floor(),
             hi: self.hi.floor(),
             nan: self.nan,
+            // `floor(0.5)` is zero, so rounding destroys the fact.
+            nonzero: false,
         }
     }
 
@@ -402,6 +460,7 @@ impl Interval {
             lo: self.lo.ceil(),
             hi: self.hi.ceil(),
             nan: self.nan,
+            nonzero: false,
         }
     }
 
@@ -422,6 +481,8 @@ impl Interval {
                 0.0
             },
             nan: self.nan,
+            // `sign` of a non-zero is +1 or -1, never zero.
+            nonzero: self.nonzero,
         }
     }
 
@@ -467,6 +528,7 @@ impl Interval {
                 lo: 0.0,
                 hi: f64::INFINITY,
                 nan: self.nan,
+                nonzero: false,
             };
         }
         Interval::TOP
@@ -477,6 +539,7 @@ impl Interval {
         lo: 0.0,
         hi: 1.0,
         nan: false,
+        nonzero: false,
     };
 }
 

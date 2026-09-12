@@ -695,8 +695,10 @@ impl RecExpr {
         let n = self.node(id);
         match n.op {
             Op::Const(c) => {
-                if c.get() < 0.0 {
-                    // Keep `2 ^ -1` from lexing back as `2 ^ - 1` ambiguously.
+                // A negative literal needs brackets in an operand position, or
+                // `2 ^ -1` lexes back as a subtraction. On its own it does
+                // not, and `(-1)` is a strange thing to hand back as an answer.
+                if c.get() < 0.0 && parent_prec > 0 {
                     out.push('(');
                     out.push_str(&c.to_string());
                     out.push(')');

@@ -14,6 +14,9 @@ fn contains(i: &Interval, x: f64) -> bool {
     if x.is_nan() {
         return i.nan;
     }
+    if i.nonzero && x == 0.0 {
+        return false;
+    }
     // The bounds are outward-rounded, so a plain comparison is the right test.
     x >= i.lo && x <= i.hi
 }
@@ -177,6 +180,43 @@ fn meet_of_disagreeing_facts_stays_conservative() {
 }
 
 #[test]
+fn the_nonzero_fact_sharpens_the_predicates() {
+    // An interval cannot say "anything but zero" with bounds alone, so the
+    // fact is carried as its own bit. It is exactly what division
+    // cancellation needs from a caller who knows the divisor is not zero.
+    let unknown = Interval::new(-5.0, 5.0);
+    assert!(!unknown.is_nonzero());
+    assert!(unknown.nonzero().is_nonzero());
+    assert!(unknown.nonzero().is_finite_nonzero());
+
+    let nonneg = Interval::new(0.0, 5.0);
+    assert!(!nonneg.is_positive());
+    assert!(nonneg.nonzero().is_positive(), "x >= 0 and x != 0 is x > 0");
+
+    let nonpos = Interval::new(-5.0, 0.0);
+    assert!(!nonpos.is_negative());
+    assert!(nonpos.nonzero().is_negative());
+
+    // It survives exactly the operations that cannot produce a zero from a
+    // non-zero, and no others.
+    assert!(unknown.nonzero().neg().is_nonzero());
+    assert!(unknown.nonzero().abs().is_nonzero());
+    assert!(Interval::new(1.0, 4.0).nonzero().sqrt().is_nonzero());
+    assert!(!unknown.nonzero().add(unknown.nonzero()).is_nonzero());
+    assert!(!unknown.nonzero().mul(unknown.nonzero()).is_nonzero());
+    assert!(!unknown.nonzero().floor().is_nonzero());
+
+    // Either side of a meet knowing it settles the question; a join needs both.
+    assert!(unknown.meet(unknown.nonzero()).is_nonzero());
+    assert!(!unknown.join(unknown.nonzero()).is_nonzero());
+
+    // And NaN still poisons it, as it poisons everything else.
+    let mut maybe_nan = unknown.nonzero();
+    maybe_nan.nan = true;
+    assert!(!maybe_nan.is_nonzero());
+}
+
+#[test]
 fn predicates_match_their_meanings() {
     assert!(Interval::new(1.0, 2.0).is_positive());
     assert!(Interval::new(0.0, 2.0).is_nonneg());
@@ -197,6 +237,7 @@ fn predicates_match_their_meanings() {
         lo: 1.0,
         hi: 2.0,
         nan: true,
+        nonzero: false,
     };
     assert!(!maybe_nan.is_positive());
     assert!(!maybe_nan.is_nonzero());

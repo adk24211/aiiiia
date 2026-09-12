@@ -26,7 +26,8 @@
 //! `minmax_ties_agree` below checks them directly.
 
 use super::{
-    and, const_satisfies, is_nonneg, is_nonzero, is_not_nan, is_positive, on_var, Cond, Rule,
+    and, bounds, const_satisfies, is_nonneg, is_nonzero, is_not_nan, is_positive, on_range, on_var,
+    Cond, Rule,
 };
 use crate::analysis::MathAnalysis;
 use crate::egraph::EGraph;
@@ -69,6 +70,55 @@ fn is_normalized_bool(v: &str) -> Cond {
 pub fn safe() -> Vec<Rule> {
     vec![
         // -- if ------------------------------------------------------------
+        // --- what the analysis can settle outright ------------------------
+        //
+        // These fire only when the intervals put one value strictly on one
+        // side of the other, which for a bare variable means the caller said
+        // so. They are the rules an assumption buys.
+        //
+        // Every one demands that neither side may be NaN: against NaN every
+        // comparison is false, `min` and `max` return the other operand, and
+        // none of the orderings below mean anything.
+        rw!("lt-known-true"; "?a < ?b" => "1",
+            if "every ?a is below every ?b",
+            bounds("?a", "?b", |a, b| !a.nan && !b.nan && a.hi < b.lo)),
+        rw!("lt-known-false"; "?a < ?b" => "0",
+            if "no ?a is below any ?b",
+            bounds("?a", "?b", |a, b| !a.nan && !b.nan && a.lo >= b.hi)),
+        rw!("le-known-true"; "?a <= ?b" => "1",
+            if "every ?a is at most every ?b",
+            bounds("?a", "?b", |a, b| !a.nan && !b.nan && a.hi <= b.lo)),
+        rw!("le-known-false"; "?a <= ?b" => "0",
+            if "every ?a is above every ?b",
+            bounds("?a", "?b", |a, b| !a.nan && !b.nan && a.lo > b.hi)),
+        // Disjoint ranges cannot hold equal values. `>=` and `>` need no twin:
+        // `lt-to-gt` and friends put the mirrored comparison in the same
+        // class, where these already fire.
+        rw!("eq-known-false"; "?a == ?b" => "0",
+        if "?a and ?b have disjoint ranges",
+        bounds("?a", "?b", |a, b| {
+            !a.nan && !b.nan && (a.hi < b.lo || b.hi < a.lo)
+        })),
+        rw!("ne-known-true"; "?a != ?b" => "1",
+        if "?a and ?b have disjoint ranges",
+        bounds("?a", "?b", |a, b| {
+            !a.nan && !b.nan && (a.hi < b.lo || b.hi < a.lo)
+        })),
+        // Strict, not `<=`: at a tie the two could be zeros of opposite sign,
+        // and `min` is specified to return the negative one rather than the
+        // first.
+        rw!("min-known"; "min(?a, ?b)" => "?a",
+            if "every ?a is strictly below every ?b",
+            bounds("?a", "?b", |a, b| !a.nan && !b.nan && a.hi < b.lo)),
+        rw!("max-known"; "max(?a, ?b)" => "?a",
+            if "every ?a is strictly above every ?b",
+            bounds("?a", "?b", |a, b| !a.nan && !b.nan && a.lo > b.hi)),
+        // A condition the analysis can decide makes the branch unconditional.
+        // `is_nonzero` already excludes NaN, which is the other falsy value.
+        rw!("if-known-true"; "if(?c, ?a, ?b)" => "?a",
+            if "?c is never zero or NaN", is_nonzero("?c")),
+        rw!("if-known-false"; "if(?c, ?a, ?b)" => "?b",
+            if "?c is always zero", on_range("?c", |r| r.is_zero())),
         rw!("if-same"; "if(?c, ?a, ?a)" => "?a"),
         rw!("if-const-true"; "if(?c, ?a, ?b)" => "?a",
             if "?c is a constant that is not zero", const_satisfies("?c", |x| x != 0.0)),
@@ -326,9 +376,28 @@ mod tests {
             "min-plus-max" => |e: &Env| nonzero(e, "?a") && not_nan(e, "?b"),
             "abs-positive" | "sign-positive" => |e: &Env| val(e, "?x") > 0.0,
             "abs-negative" | "sign-negative" => |e: &Env| val(e, "?x") < 0.0,
+            // The rules that fire when the analysis can order the two values.
+            // Here the ordering is the concrete one, which is what the
+            // intervals are an approximation of.
+            "lt-known-true" | "min-known" => |e: &Env| ordered(e) && val(e, "?a") < val(e, "?b"),
+            "lt-known-false" => |e: &Env| ordered(e) && val(e, "?a") >= val(e, "?b"),
+            "le-known-true" => |e: &Env| ordered(e) && val(e, "?a") <= val(e, "?b"),
+            "le-known-false" | "max-known" => |e: &Env| ordered(e) && val(e, "?a") > val(e, "?b"),
+            "eq-known-false" | "ne-known-true" => {
+                |e: &Env| ordered(e) && val(e, "?a") != val(e, "?b")
+            }
+            "if-known-true" => |e: &Env| not_nan(e, "?c") && val(e, "?c") != 0.0,
+            "if-known-false" => |e: &Env| not_nan(e, "?c") && val(e, "?c") == 0.0,
             _ => return None,
         };
         Some(f)
+    }
+
+    /// Neither of the two compared values is NaN, which is what every
+    /// ordering below silently assumes: against NaN each comparison is false
+    /// and `min` and `max` return the other operand.
+    fn ordered(e: &Env) -> bool {
+        not_nan(e, "?a") && not_nan(e, "?b")
     }
 
     /// Assert that `lhs` and `rhs` evaluate to the same double for every

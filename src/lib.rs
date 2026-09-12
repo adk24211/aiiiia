@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod analysis;
+pub mod assume;
 pub mod check;
 pub mod codegen;
 pub mod egraph;
@@ -48,6 +49,7 @@ pub mod unionfind;
 pub mod vm;
 
 pub use analysis::{Analysis, MathAnalysis, MathData, NoAnalysis};
+pub use assume::Assumptions;
 pub use check::{Checker, Report};
 pub use codegen::{emit, Lang};
 pub use egraph::{EClass, EGraph, EGraphStats};

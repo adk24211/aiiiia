@@ -119,6 +119,7 @@ impl Args {
             "calls",
             "lang",
             "name",
+            "assume",
         ];
         const BOOL_FLAGS: &[&str] = &[
             "help", "version", "stats", "shared", "sexp", "dot", "raw", "wild", "tame", "opt",
@@ -303,6 +304,7 @@ impl Cost {
 struct Options {
     rules: Vec<Rewrite<MathAnalysis>>,
     rules_name: String,
+    assumptions: saturn::Assumptions,
     cost: Cost,
     iters: usize,
     nodes: usize,
@@ -321,9 +323,19 @@ impl Options {
                 names.join(", ")
             )
         })?;
+        let mut assumptions = saturn::Assumptions::new();
+        for text in args.all("assume") {
+            for (var, fact) in saturn::assume::parse(text).map_err(|e| e.render())? {
+                assumptions
+                    .entry(var)
+                    .and_modify(|existing| *existing = existing.meet(fact))
+                    .or_insert(fact);
+            }
+        }
         Ok(Options {
             rules,
             rules_name: name,
+            assumptions,
             cost: Cost::parse(args.get("cost"))?,
             iters: args.num("iters")?.unwrap_or(20),
             nodes: args.num("nodes")?.unwrap_or(20_000),
@@ -332,16 +344,19 @@ impl Options {
         })
     }
 
-    fn run(&self, expr: &RecExpr) -> Runner<MathAnalysis> {
-        let mut r = Runner::default()
-            .with_expr(expr)
+    fn runner(&self) -> Runner<MathAnalysis> {
+        let mut r = Runner::new(MathAnalysis::assuming(self.assumptions.clone()))
             .with_iter_limit(self.iters)
             .with_node_limit(self.nodes)
             .with_time_limit(self.time);
         if self.backoff {
             r = r.with_scheduler(BackoffScheduler::default());
         }
-        r.run(&self.rules)
+        r
+    }
+
+    fn run(&self, expr: &RecExpr) -> Runner<MathAnalysis> {
+        self.runner().with_expr(expr).run(&self.rules)
     }
 
     /// Saturate and extract, returning the optimized expression and the run.
@@ -841,15 +856,12 @@ fn derive(
     a: &RecExpr,
     b: &RecExpr,
 ) -> (Option<saturn::Explanation>, Runner<MathAnalysis>) {
-    let mut runner = Runner::default()
+    let runner = opts
+        .runner()
         .with_explanations()
-        .with_iter_limit(opts.iters)
-        .with_node_limit(opts.nodes)
-        .with_time_limit(opts.time);
-    if opts.backoff {
-        runner = runner.with_scheduler(BackoffScheduler::default());
-    }
-    let runner = runner.with_expr(a).with_expr(b).run(&opts.rules);
+        .with_expr(a)
+        .with_expr(b)
+        .run(&opts.rules);
     let explanation = runner.explain_roots(0, 1);
     (explanation, runner)
 }
@@ -1255,6 +1267,8 @@ OPTIONS
   --time <secs>         wall-clock limit                [default: 3]
   --scheduler <s>       backoff | simple                [default: backoff]
   -D name=value         bind a variable (repeatable)
+  --assume <facts>      what is true of the variables, e.g. 'x > 0, finite(y)'
+                        (repeatable; taken on trust)
   --shared              print shared subterms as `let` bindings
   --why                 in `opt`, justify the result with the rules that fired
   --stats, -s           show per-iteration and per-rule statistics
@@ -1282,6 +1296,7 @@ EXAMPLES
   saturn fuzz --rules safe --count 5000
   saturn emit 'a*x^3 + b*x^2 + c*x + d' --rules all --lang rust --name poly
   saturn why 'x*y + x*z' 'x*(y + z)' --rules all
+  saturn opt 'w / w * x' --assume 'finite(w) && nonzero(w)'
 ";
 
 fn main() -> ExitCode {

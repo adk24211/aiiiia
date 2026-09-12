@@ -45,6 +45,14 @@ pub type Rule = Rewrite<MathAnalysis>;
 
 type Cond = Box<dyn Fn(&EGraph<MathAnalysis>, Id, &Subst) -> bool + Send + Sync>;
 
+/// A fact about the range of one bound variable.
+pub fn on_range(
+    v: &str,
+    f: impl Fn(&crate::interval::Interval) -> bool + Send + Sync + 'static,
+) -> Cond {
+    on_var(v, f)
+}
+
 fn on_var(v: &str, f: impl Fn(&crate::interval::Interval) -> bool + Send + Sync + 'static) -> Cond {
     let sym = Sym::new(v);
     Box::new(move |egraph, _matched, subst| match subst.get(sym) {
@@ -95,6 +103,24 @@ pub fn is_int_const(v: &str) -> Cond {
 /// `?v` is a known literal satisfying `pred`.
 pub fn const_satisfies(v: &str, pred: impl Fn(f64) -> bool + Send + Sync + 'static) -> Cond {
     on_var(v, move |r| r.as_constant().map(&pred).unwrap_or(false))
+}
+
+/// A fact about two bound variables at once.
+///
+/// Every other helper here asks about one value. Ordering two of them is what
+/// lets `min`, `max` and the comparisons resolve when the analysis — usually
+/// because the caller supplied an assumption — knows enough to put one below
+/// the other.
+pub fn bounds(
+    a: &str,
+    b: &str,
+    f: impl Fn(&crate::interval::Interval, &crate::interval::Interval) -> bool + Send + Sync + 'static,
+) -> Cond {
+    let (a, b) = (Sym::new(a), Sym::new(b));
+    Box::new(move |egraph, _, subst| match (subst.get(a), subst.get(b)) {
+        (Some(x), Some(y)) => f(&egraph[x].data.range, &egraph[y].data.range),
+        _ => false,
+    })
 }
 
 /// Both conditions hold.
