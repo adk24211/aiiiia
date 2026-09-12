@@ -53,14 +53,14 @@ $ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --stats
   optimized x * (c + x * (b + x * a)) + d
             11 nodes, 15.625 ops  91% cheaper
 
-  e-graph   32 classes, 61 nodes, 6 iterations, 1.4ms (saturated)
+  e-graph   32 classes, 61 nodes, 6 iterations, 1.3ms (saturated)
   rules     201 rules from `all`
 
   stopped: saturated
   iterations: 6
   classes: 32
   nodes: 61
-  total time: 1.37ms
+  total time: 1.30ms
   rules that fired:
         20  assoc-add
          8  factor
@@ -69,12 +69,12 @@ $ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --stats
          1  mul-pow
 
   iteration    classes    nodes   matches   time
-          0         19       25         7   110.8µs
-          1         29       47        33   131.4µs
-          2         31       56        89   237.6µs
-          3         34       63       123   414.9µs
-          4         32       61       141   246.9µs
-          5         32       61       141   230.5µs
+          0         19       25         7   114.2µs
+          1         29       47        33   139.4µs
+          2         31       56        89   209.3µs
+          3         34       63       123   268.2µs
+          4         32       61       141   269.2µs
+          5         32       61       141   297.5µs
 ```
 
 Every rule that fired is a one-line local identity. Horner's form is what falls
@@ -93,7 +93,7 @@ $ saturn opt 'u / w + v / w' --rules all
   optimized (u + v) / w
             5 nodes, 16.375 ops  48% cheaper
 
-  e-graph   7 classes, 8 nodes, 2 iterations, 130.9µs (saturated)
+  e-graph   7 classes, 8 nodes, 2 iterations, 170.6µs (saturated)
   rules     201 rules from `all`
 ```
 
@@ -151,9 +151,9 @@ $ saturn time 'a*x^3 + b*x^2 + c*x + d' --rules all
   optimized x * (c + x * (b + x * a)) + d
 
                           ns/eval   speedup
-  interpreted                949.5   1.0x
-  compiled                    73.9   12.8x
-  compiled + optimized        27.3   34.7x
+  interpreted                969.5   1.0x
+  compiled                    77.9   12.5x
+  compiled + optimized        26.7   36.2x
 
   program 15 -> 11 instructions, 5 -> 5 slots, 201 rules from `all`
 ```
@@ -167,6 +167,31 @@ than eleven.
 The cost model said 91% cheaper; the machine says 2.7x, on top of the 13x that
 compiling buys on its own. A cost model is a guess about hardware — `saturn
 time` is the hardware answering.
+
+### It emits code
+
+<!-- DEMO:emit -->
+
+```console
+$ saturn emit 'a*x^3 + b*x^2 + c*x + d' --rules all --name poly
+#include <math.h>
+
+double poly(double a, double b, double c, double d, double x) {
+    return x * (c + x * (b + x * a)) + d;
+}
+```
+
+C, Rust, or Python. Subterms used more than once become temporaries; anything
+the target spells differently — `min` and `max`, whose standard versions leave
+the tie between `+0.0` and `-0.0` unspecified, `sign`, which no target has,
+and in Python `/`, `pow`, `sqrt`, `log` and the rest, which raise where
+IEEE-754 returns a value — gets a small helper that restores the double's
+behaviour.
+
+That list is not from reading the standards. The test suite compiles the
+emitted C and Rust, runs the emitted Python, and compares 120 random
+expressions over 24 hostile input rows against the reference interpreter,
+**bit for bit**. Every item on it was a failure first.
 
 ### It checks itself
 
@@ -256,6 +281,7 @@ binders out of the e-graph entirely.
 | `saturn check <expr>` | compare the optimized form against the original numerically |
 | `saturn fuzz` | generate random expressions and test the rules for soundness |
 | `saturn vm <expr>` | compile to bytecode and disassemble |
+| `saturn emit <expr>` | print the optimized expression as C, Rust, or Python |
 | `saturn time <expr>` | measure interpreted, compiled, and optimized evaluation |
 | `saturn ast <expr>` | show the parsed expression DAG |
 | `saturn egraph <expr>` | dump the saturated e-graph, or `--dot` for Graphviz |
@@ -292,20 +318,20 @@ $ saturn bench
   using 201 rules from `all`
 
   name           nodes -> nodes     ops -> ops      classes    time
-  identity         7 -> 1           10 -> 0            839   320.0ms
-  factor           9 -> 7           14 -> 6             15   406.8µs
-  cancel           5 -> 3           20 -> 1            809    65.0ms
-  powers           5 -> 5          160 -> 16          1177   166.7ms
-  exp-fuse         8 -> 6          143 -> 47            14   406.8µs
-  log-ratio        5 -> 4           91 -> 60             8   183.4µs
+  identity         7 -> 1           10 -> 0            839   321.5ms
+  factor           9 -> 7           14 -> 6             15   483.6µs
+  cancel           5 -> 3           20 -> 1            809    65.8ms
+  powers           5 -> 5          160 -> 16          1177   171.5ms
+  exp-fuse         8 -> 6          143 -> 47            14   366.9µs
+  log-ratio        5 -> 4           91 -> 60             8   218.1µs
   trig             6 -> 1          129 -> 0              7   134.4µs
   horner          15 -> 11         176 -> 16            32     1.2ms
-  divide           6 -> 5           31 -> 16             7   149.2µs
-  deriv            9 -> 8            - -> 8           1302   697.5ms
-  deriv-chain      5 -> 8            - -> 178          853   333.7ms
-  sqrt-square      7 -> 6           49 -> 26             8   279.1µs
-  boolean          8 -> 6            6 -> 4              8   197.4µs
-  big              7 -> 7           10 -> 10           557    54.0ms
+  divide           6 -> 5           31 -> 16             7   160.7µs
+  deriv            9 -> 8            - -> 8           1302   722.0ms
+  deriv-chain      5 -> 8            - -> 178          853   346.5ms
+  sqrt-square      7 -> 6           49 -> 26             8   204.2µs
+  boolean          8 -> 6            6 -> 4              8   135.5µs
+  big              7 -> 7           10 -> 10           557    56.8ms
 
   overall 76% cheaper (derivatives excluded: they have no runtime cost to compare against)
 ```
@@ -418,6 +444,7 @@ impl Analysis for CountLeaves {
 | `src/rules/` | the rule library, split by tier |
 | `src/vm.rs` | bytecode compiler and register machine |
 | `src/eval.rs` | the reference interpreter |
+| `src/codegen.rs` | emitting C, Rust, and Python |
 | `src/gen.rs` `src/check.rs` | random expressions and differential testing |
 
 ---

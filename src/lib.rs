@@ -28,6 +28,7 @@
 
 pub mod analysis;
 pub mod check;
+pub mod codegen;
 pub mod egraph;
 pub mod eval;
 pub mod extract;
@@ -47,6 +48,7 @@ pub mod vm;
 
 pub use analysis::{Analysis, MathAnalysis, MathData, NoAnalysis};
 pub use check::{Checker, Report};
+pub use codegen::{emit, Lang};
 pub use egraph::{EClass, EGraph, EGraphStats};
 pub use eval::{eval, eval_at, Env, EvalError};
 pub use extract::{AstDepth, AstSize, CostFunction, DagExtractor, Extractor, OpCost};

@@ -102,6 +102,53 @@ pub enum Op {
     Diff,
 }
 
+/// `min` with the tie between zeros settled.
+///
+/// `f64::min` and C's `fmin` both return "either input" when the two compare
+/// equal, which for `+0.0` and `-0.0` means the answer depends on the operand
+/// order, on the instruction the compiler picked, and on whether the operands
+/// were constants. That is fatal here twice over: commutative e-nodes store
+/// their children in a canonical order, so `min(a, b)` and `min(b, a)` must be
+/// the *same* value, and constant folding must agree with the interpreter.
+/// Specifying it costs one comparison and makes both true.
+#[inline]
+pub fn min(a: f64, b: f64) -> f64 {
+    if a.is_nan() {
+        return b;
+    }
+    if b.is_nan() {
+        return a;
+    }
+    if a == b {
+        // The negative zero is the smaller one.
+        return if a.is_sign_negative() { a } else { b };
+    }
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+/// `max`, with the same tie-break as [`min`] but the other way up.
+#[inline]
+pub fn max(a: f64, b: f64) -> f64 {
+    if a.is_nan() {
+        return b;
+    }
+    if b.is_nan() {
+        return a;
+    }
+    if a == b {
+        return if a.is_sign_negative() { b } else { a };
+    }
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
 impl Op {
     /// Number of children this operator takes.
     pub const fn arity(self) -> usize {
@@ -238,8 +285,8 @@ impl Op {
             Mul => args[0] * args[1],
             Div => args[0] / args[1],
             Pow => args[0].powf(args[1]),
-            Min => args[0].min(args[1]),
-            Max => args[0].max(args[1]),
+            Min => min(args[0], args[1]),
+            Max => max(args[0], args[1]),
             Atan2 => args[0].atan2(args[1]),
             Neg => -args[0],
             Sqrt => args[0].sqrt(),

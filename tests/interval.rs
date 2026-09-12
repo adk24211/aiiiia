@@ -229,3 +229,61 @@ fn division_by_a_straddling_interval_is_unbounded() {
     assert_eq!(q.lo, f64::NEG_INFINITY);
     assert_eq!(q.hi, f64::INFINITY);
 }
+
+#[test]
+fn min_and_max_are_genuinely_commutative() {
+    use saturn::lang::{max, min};
+
+    // `f64::min` and `f64::max` return "either input" when the two compare
+    // equal, so on ±0 they depend on operand order. Commutative e-nodes store
+    // their children in a canonical order, so anything the e-graph calls
+    // commutative has to actually be.
+    let values = [
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+        f64::MIN_POSITIVE,
+        -f64::MIN_POSITIVE,
+    ];
+    for &a in &values {
+        for &b in &values {
+            let (m1, m2) = (min(a, b), min(b, a));
+            assert!(
+                m1.to_bits() == m2.to_bits() || (m1.is_nan() && m2.is_nan()),
+                "min({:?}, {:?}) = {:?} but min({:?}, {:?}) = {:?}",
+                a,
+                b,
+                m1,
+                b,
+                a,
+                m2
+            );
+            let (x1, x2) = (max(a, b), max(b, a));
+            assert!(
+                x1.to_bits() == x2.to_bits() || (x1.is_nan() && x2.is_nan()),
+                "max({:?}, {:?}) = {:?} but max({:?}, {:?}) = {:?}",
+                a,
+                b,
+                x1,
+                b,
+                a,
+                x2
+            );
+        }
+    }
+
+    // And the tie between the zeros goes the way the names say.
+    assert!(min(0.0, -0.0).is_sign_negative());
+    assert!(min(-0.0, 0.0).is_sign_negative());
+    assert!(max(0.0, -0.0).is_sign_positive());
+    assert!(max(-0.0, 0.0).is_sign_positive());
+
+    // NaN is ignored, matching fmin and fmax rather than propagating.
+    assert_eq!(min(f64::NAN, 3.0), 3.0);
+    assert_eq!(max(3.0, f64::NAN), 3.0);
+    assert!(min(f64::NAN, f64::NAN).is_nan());
+}

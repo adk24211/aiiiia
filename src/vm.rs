@@ -236,8 +236,10 @@ fn apply2(op: Op, a: f64, b: f64) -> f64 {
         Mul => a * b,
         Div => a / b,
         Pow => a.powf(b),
-        Min => a.min(b),
-        Max => a.max(b),
+        // Not `f64::min`/`max`: those leave the ±0 tie unspecified, and the
+        // VM has to agree with the interpreter bit for bit.
+        Min => crate::lang::min(a, b),
+        Max => crate::lang::max(a, b),
         other => other.eval(&[a, b]).expect("binary operator"),
     }
 }

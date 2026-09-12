@@ -2,6 +2,7 @@
 
 use saturn::analysis::MathAnalysis;
 use saturn::check::Checker;
+use saturn::codegen::{emit, Lang};
 use saturn::egraph::EGraph;
 use saturn::eval::{eval, parse_bindings, Env};
 use saturn::extract::{dag_cost, tree_cost, AstDepth, AstSize, Extractor, OpCost};
@@ -116,6 +117,8 @@ impl Args {
             "max-failures",
             "set",
             "calls",
+            "lang",
+            "name",
         ];
         const BOOL_FLAGS: &[&str] = &[
             "help", "version", "stats", "shared", "sexp", "dot", "raw", "wild", "tame", "opt",
@@ -498,6 +501,10 @@ fn format_value(v: f64) -> String {
         } else {
             "-inf".into()
         }
+    } else if v == 0.0 && v.is_sign_negative() {
+        // `0` would hide the sign, and `-0.0` is a value this language can
+        // tell apart from `0.0`.
+        "-0".into()
     } else if v == v.trunc() && v.abs() < 1e15 {
         format!("{}", v as i64)
     } else {
@@ -800,6 +807,26 @@ fn measure(run: &mut dyn FnMut(usize) -> f64, calls: usize) -> f64 {
     best
 }
 
+fn cmd_emit(args: &Args, _st: &Style) -> Result<(), String> {
+    let src = args.expr_arg()?;
+    let expr = parse(&src).map_err(|e| e.render())?;
+    let lang_name = args.get("lang").unwrap_or("c");
+    let lang = Lang::parse(lang_name).ok_or_else(|| {
+        format!(
+            "unknown language `{}`; expected c, rust, or python",
+            lang_name
+        )
+    })?;
+    let name = args.get("name").unwrap_or("f");
+    let expr = if args.has("raw") {
+        expr
+    } else {
+        Options::from(args)?.optimize(&expr).0
+    };
+    print!("{}", emit(&expr, lang, name));
+    Ok(())
+}
+
 fn cmd_time(args: &Args, st: &Style) -> Result<(), String> {
     let src = args.expr_arg()?;
     let expr = parse(&src).map_err(|e| e.render())?;
@@ -1081,6 +1108,7 @@ COMMANDS
   eval <expr>           evaluate, with -D x=1.5 bindings
   diff <var> <expr>     differentiate symbolically, simplifying as it goes
   check <expr>          compare the optimized form against the original numerically
+  emit <expr>           print the optimized expression as C, Rust, or Python
   vm <expr>             compile to bytecode and disassemble
   ast <expr>            show the parsed expression DAG
   egraph <expr>         dump the saturated e-graph (--dot for Graphviz)
@@ -1105,7 +1133,9 @@ OPTIONS
   --seed <n>            random seed for `check`         [default: 1447]
   --tol <x>             relative tolerance for `check`  [default: 1e-9]
   --wild                let `check` use infinities and huge magnitudes
-  --raw                 in `vm`, compile without optimizing first
+  --lang <l>            c | rust | python, for `emit`      [default: c]
+  --name <id>           name of the emitted function        [default: f]
+  --raw                 in `vm` and `emit`, skip optimizing first
   --count <n>           expressions to generate in `fuzz`  [default: 1000]
   --depth <n>           generated expression depth          [default: 5]
   --arith, --logic      restrict or widen the fuzz grammar
@@ -1121,6 +1151,7 @@ EXAMPLES
   saturn check 'a*x^3 + b*x^2 + c*x + d' --samples 20000
   saturn vm 'u / w + v / w'
   saturn fuzz --rules safe --count 5000
+  saturn emit 'a*x^3 + b*x^2 + c*x + d' --rules all --lang rust --name poly
 ";
 
 fn main() -> ExitCode {
@@ -1159,6 +1190,7 @@ fn main() -> ExitCode {
         "bench" => cmd_bench(&args, &st).map(|_| true),
         "fuzz" => cmd_fuzz(&args, &st),
         "time" => cmd_time(&args, &st).map(|_| true),
+        "emit" | "codegen" => cmd_emit(&args, &st).map(|_| true),
         "repl" => cmd_repl(&st).map(|_| true),
         other => Err(format!("unknown command `{}`; run `saturn --help`", other)),
     };
