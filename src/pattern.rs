@@ -420,6 +420,28 @@ impl Pattern {
         ids[self.root()]
     }
 
+    /// Turn this pattern into an ordinary expression, with each pattern
+    /// variable becoming a variable of the same name.
+    ///
+    /// The name keeps its leading `?`, which the parser never produces for an
+    /// ordinary variable, so a converted pattern can never collide with a
+    /// user's own names. This is what lets a test evaluate the two sides of a
+    /// rule against each other directly.
+    pub fn to_expr(&self) -> RecExpr {
+        let mut expr = RecExpr::new();
+        let mut ids: Vec<Id> = Vec::with_capacity(self.nodes.len());
+        for node in &self.nodes {
+            let id = match node {
+                PatNode::Var(v) => expr.var(*v),
+                PatNode::Op(op, children) => {
+                    expr.op(*op, children.iter().map(|&c| ids[c]).collect())
+                }
+            };
+            ids.push(id);
+        }
+        expr.compact(ids[self.root()])
+    }
+
     /// Build a standalone expression from this pattern and a map from variable
     /// name to expression. Used by the rule pretty-printer and tests.
     pub fn to_string_pretty(&self) -> String {

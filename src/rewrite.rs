@@ -23,6 +23,24 @@ pub trait Applier<A: Analysis> {
     fn describe(&self) -> String {
         "<dynamic>".to_string()
     }
+
+    /// The pattern this applier instantiates, when it is a plain pattern,
+    /// looking through any conditions wrapped around it.
+    ///
+    /// Tests use it to check a rule's two sides against each other directly.
+    /// A dynamic applier returns `None`, because its result is not a fixed
+    /// pattern.
+    fn as_pattern(&self) -> Option<&Pattern> {
+        None
+    }
+
+    /// Whether every side condition on this applier is satisfied.
+    ///
+    /// Exposed so that a test can ask the real analysis the same question the
+    /// rule asks, and check the identity exactly where the rule would fire.
+    fn condition_holds(&self, _egraph: &EGraph<A>, _matched: Id, _subst: &Subst) -> bool {
+        true
+    }
 }
 
 /// The ordinary right-hand side: instantiate a pattern.
@@ -41,6 +59,9 @@ impl<A: Analysis> Applier<A> for Pattern {
     }
     fn describe(&self) -> String {
         self.to_string_pretty()
+    }
+    fn as_pattern(&self) -> Option<&Pattern> {
+        Some(self)
     }
 }
 
@@ -67,6 +88,13 @@ impl<A: Analysis> Applier<A> for ConditionalApplier<A> {
     }
     fn describe(&self) -> String {
         format!("{} if {}", self.applier.describe(), self.description)
+    }
+    fn as_pattern(&self) -> Option<&Pattern> {
+        self.applier.as_pattern()
+    }
+    fn condition_holds(&self, egraph: &EGraph<A>, matched: Id, subst: &Subst) -> bool {
+        (self.condition)(egraph, matched, subst)
+            && self.applier.condition_holds(egraph, matched, subst)
     }
 }
 

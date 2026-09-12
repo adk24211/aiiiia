@@ -298,3 +298,111 @@ fn no_derivative_node_survives_saturation() {
         left
     );
 }
+
+/// Every rule in the safe tier, checked in isolation, exactly where it fires.
+///
+/// The sweeps above test the rules as a system, which is where an interaction
+/// bug shows up. This tests each rule as a *claim*. For a rule without a side
+/// condition, substitute a fresh value for each pattern variable and evaluate
+/// the two sides against each other over hostile inputs. For a conditional
+/// rule, build the left-hand side in a real e-graph with those values, ask the
+/// analysis the same question the rule asks, and check the identity only where
+/// the answer is yes -- which is the only place the rule ever fires, and
+/// therefore the only place it has to hold.
+///
+/// A rule that is merely wrong shows up here named, instead of hiding inside
+/// whatever expression happened to trigger it.
+#[test]
+fn every_safe_rule_is_exact_where_it_fires() {
+    use saturn::egraph::EGraph;
+    use saturn::lang::ENode;
+    use saturn::parser::substitute;
+    use std::collections::HashMap;
+
+    const SAMPLES: usize = 3_000;
+    let mut rng = Rng::seed(0xE7AC7);
+    let mut unconditional = 0;
+    let mut conditional = 0;
+    let mut dynamic = Vec::new();
+    let mut never_fired = Vec::new();
+
+    for rule in rules::safe() {
+        let Some(rhs) = rule.applier.as_pattern() else {
+            dynamic.push(rule.name.clone());
+            continue;
+        };
+        let left_pattern = rule.searcher.to_expr();
+        let right_pattern = rhs.to_expr();
+        let vars = rule.searcher.vars().to_vec();
+        let mut fired = 0usize;
+
+        for _ in 0..SAMPLES {
+            let bindings: HashMap<Sym, f64> = vars.iter().map(|&v| (v, rng.float())).collect();
+            let left = substitute(&left_pattern, &bindings);
+            let right = substitute(&right_pattern, &bindings);
+
+            // Ask the analysis whether this rule would fire on these values.
+            let mut egraph: EGraph<MathAnalysis> = EGraph::default();
+            let root = egraph.add_expr(&left);
+            egraph.rebuild();
+            let Some(matches) = rule.searcher.search_eclass(&egraph, root) else {
+                continue;
+            };
+            let chosen = matches.substs.iter().find(|s| {
+                vars.iter().all(|&v| match (s.get(v), bindings.get(&v)) {
+                    (Some(id), Some(&value)) => {
+                        egraph.lookup(&ENode::constant(value)) == Some(egraph.find(id))
+                    }
+                    _ => false,
+                })
+            });
+            let Some(subst) = chosen else { continue };
+            if !rule.applier.condition_holds(&egraph, root, subst) {
+                continue;
+            }
+            fired += 1;
+
+            let want = eval(&left, &Env::new()).expect("no free variables remain");
+            let got = eval(&right, &Env::new()).expect("no free variables remain");
+            assert!(
+                agree(want, got, 0.0),
+                "rule `{}` is not exact where it fires\n  {} => {}\n  with {:?}\n  left  -> {:?}\n  right -> {:?}",
+                rule.name,
+                rule.searcher,
+                rhs,
+                bindings
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), *v))
+                    .collect::<Vec<_>>(),
+                want,
+                got
+            );
+        }
+
+        if fired == 0 {
+            never_fired.push(rule.name.clone());
+        } else if rule.long_name().contains(" if ") {
+            conditional += 1;
+        } else {
+            unconditional += 1;
+        }
+    }
+
+    // Say what was not covered rather than letting a green tick imply it was.
+    eprintln!(
+        "checked {} unconditional and {} conditional rules; \
+         {} dynamic appliers cannot be checked this way ({}); \
+         {} rules never fired on random values ({})",
+        unconditional,
+        conditional,
+        dynamic.len(),
+        dynamic.join(", "),
+        never_fired.len(),
+        never_fired.join(", ")
+    );
+    assert!(
+        unconditional + conditional > 60,
+        "only {} rules were actually exercised",
+        unconditional + conditional
+    );
+}
