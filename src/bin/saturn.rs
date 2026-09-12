@@ -5,6 +5,7 @@ use saturn::check::Checker;
 use saturn::egraph::EGraph;
 use saturn::eval::{eval, parse_bindings, Env};
 use saturn::extract::{dag_cost, tree_cost, AstDepth, AstSize, Extractor, OpCost};
+use saturn::gen::{ExprStream, Grammar};
 use saturn::lang::{Op, RecExpr};
 use saturn::parser::parse;
 use saturn::rewrite::Rewrite;
@@ -80,7 +81,7 @@ impl Args {
         // with `=`.
         const TAKES_VALUE: &[&str] = &[
             "rules", "cost", "iters", "nodes", "time", "samples", "seed", "tol", "color", "D",
-            "define", "scheduler",
+            "define", "scheduler", "count", "depth", "max-failures", "set",
         ];
         while let Some(a) = it.next() {
             if let Some(rest) = a.strip_prefix("--") {
@@ -653,6 +654,76 @@ fn cmd_bench(args: &Args, st: &Style) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_fuzz(args: &Args, st: &Style) -> Result<bool, String> {
+    let opts = Options::from(args)?;
+    let count: usize = args.num("count")?.unwrap_or(1_000);
+    let depth: usize = args.num("depth")?.unwrap_or(5);
+    let seed: u64 = args.num("seed")?.unwrap_or(1);
+    let tolerance: f64 = args.num("tol")?.unwrap_or(0.0);
+    let grammar = if args.has("arith") {
+        Grammar::arithmetic()
+    } else {
+        let g = Grammar::default();
+        if args.has("logic") {
+            g.with_logic()
+        } else {
+            g
+        }
+    };
+    let checker = Checker::new()
+        .with_samples(args.num("samples")?.unwrap_or(200))
+        .with_seed(seed ^ 0x9E37_79B9_7F4A_7C15)
+        .with_tolerance(tolerance)
+        .with_wild(!args.has("tame"));
+
+    println!(
+        "  {} {} expressions, depth {}, {} rules from `{}`, tolerance {}",
+        st.dim("fuzzing"),
+        count,
+        depth,
+        opts.rules.len(),
+        opts.rules_name,
+        tolerance
+    );
+    let mut failures = 0;
+    for (i, expr) in ExprStream::new(seed, grammar, depth).take(count).enumerate() {
+        let (best, _, _) = opts.optimize(&expr);
+        let report = checker.compare(&expr, &best);
+        if !report.ok() {
+            failures += 1;
+            println!();
+            println!("  {} expression {}", st.red("MISMATCH"), i);
+            show_expr(st, "input", &expr, false);
+            show_expr(st, "optimized", &best, false);
+            for line in report.render().lines() {
+                println!("  {}", line);
+            }
+            if failures >= args.num("max-failures")?.unwrap_or(5usize) {
+                break;
+            }
+        }
+    }
+    println!();
+    if failures == 0 {
+        println!(
+            "  {} every optimized expression agreed with its input",
+            st.green("clean")
+        );
+    } else {
+        println!(
+            "  {} {} expression{} changed meaning",
+            st.red("unsound"),
+            failures,
+            if failures == 1 { "" } else { "s" }
+        );
+        println!(
+            "  {}",
+            st.dim("replay one with the same --seed; the rule that fired is the bug")
+        );
+    }
+    Ok(failures == 0)
+}
+
 fn cmd_repl(st: &Style) -> Result<(), String> {
     println!("{}", st.dim("saturn — enter an expression, or `:help`"));
     let mut env = Env::new();
@@ -746,6 +817,7 @@ COMMANDS
   egraph <expr>         dump the saturated e-graph (--dot for Graphviz)
   rules [set]           list the rule sets, or the rules in one
   bench                 run the built-in suite and report the savings
+  fuzz                  generate random expressions and check the rules are sound
   repl                  interactive
 
 OPTIONS
@@ -764,6 +836,10 @@ OPTIONS
   --tol <x>             relative tolerance for `check`  [default: 1e-9]
   --wild                let `check` use infinities and huge magnitudes
   --raw                 in `vm`, compile without optimizing first
+  --count <n>           expressions to generate in `fuzz`  [default: 1000]
+  --depth <n>           generated expression depth          [default: 5]
+  --arith, --logic      restrict or widen the fuzz grammar
+  --tame                keep fuzz inputs away from infinities and subnormals
   --color <when>        always | never | auto           [default: auto]
   -h, --help            this text
   -V, --version
@@ -774,6 +850,7 @@ EXAMPLES
   saturn opt '(a + b) / (a + b)' --rules fast-math --stats
   saturn check 'a*x^3 + b*x^2 + c*x + d' --samples 20000
   saturn vm 'u / w + v / w'
+  saturn fuzz --rules safe --count 5000
 ";
 
 fn main() -> ExitCode {
@@ -810,6 +887,7 @@ fn main() -> ExitCode {
         "check" => cmd_check(&args, &st),
         "rules" => cmd_rules(&args, &st).map(|_| true),
         "bench" => cmd_bench(&args, &st).map(|_| true),
+        "fuzz" => cmd_fuzz(&args, &st),
         "repl" => cmd_repl(&st).map(|_| true),
         other => Err(format!(
             "unknown command `{}`; run `saturn --help`",
