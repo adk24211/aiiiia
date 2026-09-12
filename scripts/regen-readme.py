@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEMOS = {
     "opt": ["opt", "a*x^3 + b*x^2 + c*x + d", "--rules", "all", "--stats"],
     "divide": ["opt", "u / w + v / w", "--rules", "all"],
+    "why": ["opt", "a*x^3 + b*x^2 + c*x + d", "--rules", "all", "--why"],
     "diff": ["diff", "x", "exp(sin(x * x))"],
     "vm": ["vm", "a*x^3 + b*x^2 + c*x + d", "--rules", "all"],
     "emit": ["emit", "a*x^3 + b*x^2 + c*x + d", "--rules", "all", "--name", "poly"],

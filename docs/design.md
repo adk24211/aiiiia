@@ -292,6 +292,41 @@ conservative: reporting "might depend on `x`" when unsure merely misses an
 optimization, while reporting "independent" wrongly produces a wrong
 derivative.
 
+## Explaining an equality
+
+Saturation answers "are these the same?" but the answer is worth little
+without the reasoning. Every union the e-graph performs records why: a rule
+with the bindings it matched, a congruence with the two nodes involved, a
+constant fold, or a bare assertion.
+
+Connectivity in that list of recorded unions is exactly union-find
+connectivity, so a path between two ids *is* a derivation of their equality,
+and a breadth-first walk finds the shortest one for free.
+
+Two things had to be true before this produced anything readable.
+
+**Arguments pair by equivalence class, not by position.** Commutative children
+are stored in a canonical order, so two congruent nodes routinely differ by a
+swap. Pairing them positionally compares arguments that are not equal at all,
+finds no derivation, and reports a congruence that needed no explanation —
+which collapsed the entire Horner proof into one useless line.
+
+**The analysis runs at rebuild, not inside `add`.** A fold performed while a
+node is being added unions its class with the literal before the caller holds
+a handle to either, leaving nothing for a derivation to connect. Deferring it
+also stops the analysis acting on a half-built graph.
+
+This is a *path*, not the full proof tree that egg constructs. Congruence
+steps unfold recursively into their arguments, bounded by depth, which is what
+a reader wants when a rule is under suspicion; a complete term-level proof
+down to the leaves is a substantially larger construction and is not here.
+
+Recording is off by default — the list grows with the number of unions, which
+on a saturating run is far larger than the number of classes — and it is
+observation only. A test asserts that a run with explanations enabled produces
+the same graph and the same extracted result as one without, because otherwise
+the derivation would describe a different run than the one it explains.
+
 ## Float soundness
 
 The rule library is split into two tiers, and the split is load-bearing.

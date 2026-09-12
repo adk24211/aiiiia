@@ -9,6 +9,7 @@ Zero dependencies, Rust 1.86+, library and CLI. ~11k lines, 228 tests.
 cargo run -- opt 'a*x^3 + b*x^2 + c*x + d' --rules all
 cargo run -- diff x 'exp(sin(x * x))'
 cargo run -- emit 'u / w + v / w' --rules all --lang rust
+cargo run -- why 'x*y + x*z' 'x*(y + z)' --rules all
 cargo run -- fuzz --rules safe --count 5000
 ```
 
@@ -33,9 +34,10 @@ knowledge of the alternatives.
 `saturn` implements that from first principles: an e-graph with congruence
 closure and deferred rebuilding, e-matching, an interval-based e-class
 analysis that discharges the side conditions float rewriting needs, a backoff
-rule scheduler, cost extraction, a symbolic differentiator written entirely as
-rewrite rules, a bytecode compiler, and a code emitter whose output is
-compiled and checked against the interpreter bit for bit.
+rule scheduler, cost extraction, derivations that justify an equality step by
+step, a symbolic differentiator written entirely as rewrite rules, a bytecode
+compiler, and a code emitter whose output is compiled and checked against the
+interpreter bit for bit.
 
 `docs/design.md` is the full tour.
 
@@ -55,14 +57,14 @@ $ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --stats
   optimized x * (c + x * (b + x * a)) + d
             11 nodes, 15.625 ops  91% cheaper
 
-  e-graph   32 classes, 61 nodes, 6 iterations, 2.2ms (saturated)
+  e-graph   32 classes, 61 nodes, 6 iterations, 1.1ms (saturated)
   rules     201 rules from `all`
 
   stopped: saturated
   iterations: 6
   classes: 32
   nodes: 61
-  total time: 2.24ms
+  total time: 1.09ms
   rules that fired:
         20  assoc-add
          8  factor
@@ -71,12 +73,12 @@ $ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --stats
          1  mul-pow
 
   iteration    classes    nodes   matches   time
-          0         19       25         7   194.0µs
-          1         29       47        33   217.7µs
-          2         31       56        89   450.4µs
-          3         34       63       123   467.7µs
-          4         32       61       141   453.2µs
-          5         32       61       141   456.8µs
+          0         19       25         7   109.7µs
+          1         29       47        33   129.4µs
+          2         31       56        89   225.1µs
+          3         34       63       123   210.8µs
+          4         32       61       141   216.4µs
+          5         32       61       141   196.8µs
 ```
 
 Every rule that fired is a one-line local identity. Horner's form is what falls
@@ -95,13 +97,58 @@ $ saturn opt 'u / w + v / w' --rules all
   optimized (u + v) / w
             5 nodes, 16.375 ops  48% cheaper
 
-  e-graph   7 classes, 8 nodes, 2 iterations, 142.1µs (saturated)
+  e-graph   7 classes, 8 nodes, 2 iterations, 139.9µs (saturated)
   rules     201 rules from `all`
 ```
 
 Nothing in the rule library knows about that expression either. The engine
 found it because the e-graph held `u / w + v / w` and `(u + v) / w` at the same
 time, and the cost model prices a divide at fifteen adds.
+
+### It shows its work
+
+An optimizer that says "these are the same" and cannot say why is asking to be
+trusted. Every union carries a reason, and `--why` walks the chain back into a
+derivation:
+
+<!-- DEMO:why -->
+
+```console
+$ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --why
+  input     a * x ^ 3 + b * x ^ 2 + x * c + d
+            15 nodes, 175.875 ops
+
+  optimized x * (c + x * (b + x * a)) + d
+            11 nodes, 15.625 ops  91% cheaper
+
+  e-graph   32 classes, 61 nodes, 6 iterations, 1.1ms (saturated)
+  rules     201 rules from `all`
+
+  yes in 4 steps
+  using congruence x3, assoc-mul
+
+  1. congruence   both sides are `+` applied to equal arguments, and
+        argument 2:
+          1. congruence   both sides are `+` applied to equal arguments, and
+                argument 1:
+                  1. congruence   both sides are `*` applied to equal arguments, and
+                        argument 2:
+                          1. assoc-mul   ?a * ?b * ?c => ?a * (?b * ?c)
+                                ?a = a
+                                ?b = x
+                                ?c = x
+```
+
+Congruence steps unfold, because "the same operator over equivalent arguments"
+is not an explanation until the arguments are explained too. `saturn why a b`
+does the same for any two expressions, and exits non-zero when the rules
+cannot prove them equal — saying whether that is a real negative (the rules
+saturated) or just a budget that ran out.
+
+Recording is off by default and observation-only: a test asserts that a run
+with explanations enabled produces the same graph and the same result as one
+without, since otherwise the derivation would describe a different run than
+the one it explains.
 
 ### Differentiation is just more rules
 
@@ -153,9 +200,9 @@ $ saturn time 'a*x^3 + b*x^2 + c*x + d' --rules all
   optimized x * (c + x * (b + x * a)) + d
 
                           ns/eval   speedup
-  interpreted                932.1   1.0x
-  compiled                    74.6   12.5x
-  compiled + optimized        29.5   31.5x
+  interpreted                655.4   1.0x
+  compiled                    61.2   10.7x
+  compiled + optimized        24.1   27.2x
 
   program 15 -> 11 instructions, 5 -> 5 slots, 201 rules from `all`
 ```
@@ -280,6 +327,7 @@ binders out of the e-graph entirely.
 | `saturn opt <expr>` | saturate and extract the cheapest equivalent expression |
 | `saturn eval <expr> -D x=1.5` | evaluate |
 | `saturn diff <var> <expr>` | differentiate, simplifying as it goes |
+| `saturn why <expr> <expr>` | show the chain of rules that proves the two equal |
 | `saturn check <expr>` | compare the optimized form against the original numerically |
 | `saturn fuzz` | generate random expressions and test the rules for soundness |
 | `saturn vm <expr>` | compile to bytecode and disassemble |
@@ -320,20 +368,20 @@ $ saturn bench
   using 201 rules from `all`
 
   name           nodes -> nodes     ops -> ops      classes    time
-  identity         7 -> 1           10 -> 0            839   318.7ms
-  factor           9 -> 7           14 -> 6             15   408.2µs
-  cancel           5 -> 3           20 -> 1            934    71.6ms
-  powers           5 -> 5          160 -> 16          1177   169.2ms
-  exp-fuse         8 -> 6          143 -> 47            14   412.8µs
-  log-ratio        5 -> 4           91 -> 60             8   184.7µs
-  trig             6 -> 1          129 -> 0              7   135.6µs
-  horner          15 -> 11         176 -> 16            32     1.2ms
-  divide           6 -> 5           31 -> 16             7   126.0µs
-  deriv            9 -> 8            - -> 8           1302   705.2ms
-  deriv-chain      5 -> 8            - -> 178          853   341.4ms
-  sqrt-square      7 -> 6           49 -> 26             8   177.3µs
-  boolean          8 -> 6            6 -> 4              8   127.9µs
-  big              7 -> 7           10 -> 10           557    54.9ms
+  identity         7 -> 1           10 -> 0            839   304.7ms
+  factor           9 -> 7           14 -> 6             15   368.6µs
+  cancel           5 -> 3           20 -> 1            902   122.6ms
+  powers           5 -> 5          160 -> 16          1177   406.1ms
+  exp-fuse         8 -> 6          143 -> 47            14   294.8µs
+  log-ratio        5 -> 4           91 -> 60             8   144.9µs
+  trig             6 -> 1          129 -> 0              7   103.8µs
+  horner          15 -> 11         176 -> 16            32   921.9µs
+  divide           6 -> 5           31 -> 16             7    98.0µs
+  deriv            9 -> 8            - -> 8           1303   599.0ms
+  deriv-chain      5 -> 8            - -> 178          839   332.1ms
+  sqrt-square      7 -> 6           49 -> 26             8   167.4µs
+  boolean          8 -> 6            6 -> 4              8   102.4µs
+  big              7 -> 7           10 -> 10           557    41.8ms
 
   overall 76% cheaper (derivatives excluded: they have no runtime cost to compare against)
 ```
@@ -443,6 +491,7 @@ impl Analysis for CountLeaves {
 | `src/rewrite.rs` | rules, conditional and dynamic appliers, the `rw!` macro |
 | `src/runner.rs` | the saturation loop and the backoff scheduler |
 | `src/extract.rs` | cost models and extraction |
+| `src/explain.rs` | derivations: why two expressions are equal |
 | `src/rules/` | the rule library, split by tier |
 | `src/vm.rs` | bytecode compiler and register machine |
 | `src/eval.rs` | the reference interpreter |
