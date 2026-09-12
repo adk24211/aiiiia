@@ -1,0 +1,8 @@
+# A 2-D rotation, written as two outputs.
+#
+# Optimized together, `cos(t)` and `sin(t)` are each computed once rather than
+# once per output:
+#
+#     saturn emit --file examples/formulas/rotate.txt --name rotate
+nx = x * cos(t) - y * sin(t)
+ny = x * sin(t) + y * cos(t)

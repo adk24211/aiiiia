@@ -58,14 +58,14 @@ $ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --stats
   optimized x * (c + x * (b + x * a)) + d
             11 nodes, 15.625 ops  91% cheaper
 
-  e-graph   32 classes, 61 nodes, 6 iterations, 1.1ms (saturated)
+  e-graph   32 classes, 61 nodes, 6 iterations, 1.0ms (saturated)
   rules     211 rules from `all`
 
   stopped: saturated
   iterations: 6
   classes: 32
   nodes: 61
-  total time: 1.13ms
+  total time: 1.05ms
   rules that fired:
         20  assoc-add
          8  factor
@@ -74,12 +74,12 @@ $ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --stats
          1  mul-pow
 
   iteration    classes    nodes   matches   time
-          0         19       25         7   133.3µs
-          1         29       47        33   138.9µs
-          2         31       56        89   194.2µs
-          3         34       63       123   238.0µs
-          4         32       61       141   226.5µs
-          5         32       61       141   200.0µs
+          0         19       25         7   104.9µs
+          1         29       47        33   118.8µs
+          2         31       56        89   188.5µs
+          3         34       63       123   202.9µs
+          4         32       61       141   237.6µs
+          5         32       61       141   195.8µs
 ```
 
 Every rule that fired is a one-line local identity. Horner's form is what falls
@@ -98,7 +98,7 @@ $ saturn opt 'u / w + v / w' --rules all
   optimized (u + v) / w
             5 nodes, 16.375 ops  48% cheaper
 
-  e-graph   7 classes, 8 nodes, 2 iterations, 130.8µs (saturated)
+  e-graph   7 classes, 8 nodes, 2 iterations, 129.2µs (saturated)
   rules     211 rules from `all`
 ```
 
@@ -201,9 +201,9 @@ $ saturn time 'a*x^3 + b*x^2 + c*x + d' --rules all
   optimized x * (c + x * (b + x * a)) + d
 
                           ns/eval   speedup
-  interpreted                708.0   1.0x
-  compiled                    63.3   11.2x
-  compiled + optimized        26.6   26.6x
+  interpreted                830.0   1.0x
+  compiled                    49.6   16.7x
+  compiled + optimized        19.2   43.2x
 
   program 15 -> 11 instructions, 5 -> 5 slots, 211 rules from `all`
 ```
@@ -242,6 +242,31 @@ That list is not from reading the standards. The test suite compiles the
 emitted C and Rust, runs the emitted Python, and compares 120 random
 expressions over 24 hostile input rows against the reference interpreter,
 **bit for bit**. Every item on it was a failure first.
+
+### It optimizes several formulas at once
+
+Optimizing formulas one at a time throws away the thing they most often have
+in common: each other. `--file` puts them in one e-graph, so a subterm two
+outputs use is found once, extracted once, and emitted once:
+
+<!-- DEMO:bundle -->
+
+```console
+$ saturn emit --file examples/formulas/quadratic.txt --rules all --name roots
+#include <math.h>
+
+void roots(double a, double b, double c, double *lo, double *hi) {
+    const double t0 = sqrt(b * b - 4.0 * a * c);
+    const double t1 = a + a;
+    *lo = (-b - t0) / t1;
+    *hi = (t0 - b) / t1;
+}
+```
+
+The input repeats `sqrt(b*b - 4*a*c)` and `2*a` in both roots; nothing tells
+the engine they are the same, and it would still find the sharing if they were
+written differently. `saturn opt --file` reports the cost together and the
+cost apart, so the difference is visible rather than claimed.
 
 ### It checks itself
 
@@ -283,7 +308,7 @@ $ saturn opt 'w / w * max(x, 0)' --assume 'finite(w) && nonzero(w), x > 0'
   optimized x
             1 nodes, 0.125 ops  99% cheaper
 
-  e-graph   4 classes, 7 nodes, 3 iterations, 122.2µs (saturated)
+  e-graph   4 classes, 7 nodes, 3 iterations, 140.2µs (saturated)
   rules     146 rules from `default`
 ```
 
@@ -360,6 +385,7 @@ binders out of the e-graph entirely.
 | `saturn fuzz` | generate random expressions and test the rules for soundness |
 | `saturn vm <expr>` | compile to bytecode and disassemble |
 | `saturn emit <expr>` | print the optimized expression as C, Rust, or Python |
+| `saturn opt --file <path>` | optimize several named expressions together |
 | `saturn time <expr>` | measure interpreted, compiled, and optimized evaluation |
 | `saturn ast <expr>` | show the parsed expression DAG |
 | `saturn egraph <expr>` | dump the saturated e-graph, or `--dot` for Graphviz |
@@ -367,7 +393,7 @@ binders out of the e-graph entirely.
 | `saturn bench` | run the built-in suite and report the savings |
 | `saturn repl` | interactive |
 
-Useful flags: `--rules <set>`, `--assume '<facts>'`, `--cost size|depth|ops`,
+Useful flags: `--file <path>`, `--rules <set>`, `--assume '<facts>'`, `--cost size|depth|ops`,
 `--iters`, `--nodes`, `--time`, `--why`, `--stats`, `--shared`. `saturn --help` has the rest. Setting
 `SATURN_TRACE=1` streams each phase to stderr as it happens.
 
@@ -396,20 +422,20 @@ $ saturn bench
   using 211 rules from `all`
 
   name           nodes -> nodes     ops -> ops      classes    time
-  identity         7 -> 1           10 -> 0            839   297.9ms
-  factor           9 -> 7           14 -> 6             15   388.5µs
-  cancel           5 -> 3           20 -> 1            902   117.1ms
-  powers           5 -> 5          160 -> 16          1177   406.9ms
-  exp-fuse         8 -> 6          143 -> 47            14   293.4µs
-  log-ratio        5 -> 4           91 -> 60             8   193.1µs
-  trig             6 -> 1          129 -> 0              7   106.2µs
-  horner          15 -> 11         176 -> 16            32   913.3µs
-  divide           6 -> 5           31 -> 16             7   102.5µs
-  deriv            9 -> 8            - -> 8           1303   543.0ms
-  deriv-chain      5 -> 8            - -> 178          839   361.5ms
-  sqrt-square      7 -> 6           49 -> 26             8   168.1µs
-  boolean          8 -> 6            6 -> 4              8   128.3µs
-  big              7 -> 7           10 -> 10           557    46.2ms
+  identity         7 -> 1           10 -> 0            839   175.1ms
+  factor           9 -> 7           14 -> 6             15   346.2µs
+  cancel           5 -> 3           20 -> 1            902    95.9ms
+  powers           5 -> 5          160 -> 16          1177   343.4ms
+  exp-fuse         8 -> 6          143 -> 47            14   334.9µs
+  log-ratio        5 -> 4           91 -> 60             8   173.5µs
+  trig             6 -> 1          129 -> 0              7   125.3µs
+  horner          15 -> 11         176 -> 16            32   935.8µs
+  divide           6 -> 5           31 -> 16             7   117.4µs
+  deriv            9 -> 8            - -> 8           1303   365.0ms
+  deriv-chain      5 -> 8            - -> 178          839   303.3ms
+  sqrt-square      7 -> 6           49 -> 26             8   150.1µs
+  boolean          8 -> 6            6 -> 4              8   143.4µs
+  big              7 -> 7           10 -> 10           557    37.3ms
 
   overall 76% cheaper (derivatives excluded: they have no runtime cost to compare against)
 ```
@@ -524,7 +550,9 @@ impl Analysis for CountLeaves {
 | `src/rules/` | the rule library, split by tier |
 | `src/vm.rs` | bytecode compiler and register machine |
 | `src/eval.rs` | the reference interpreter |
+| `src/bundle.rs` | several named expressions sharing one DAG |
 | `src/codegen.rs` | emitting C, Rust, and Python |
+| `src/fxhash.rs` | a fast hasher for the engine's own maps |
 | `src/gen.rs` `src/check.rs` | random expressions and differential testing |
 
 ---

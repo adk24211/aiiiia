@@ -31,6 +31,10 @@ DEMOS = {
     "diff": ["diff", "x", "exp(sin(x * x))"],
     "vm": ["vm", "a*x^3 + b*x^2 + c*x + d", "--rules", "all"],
     "emit": ["emit", "a*x^3 + b*x^2 + c*x + d", "--rules", "all", "--name", "poly"],
+    "bundle": [
+        "emit", "--file", "examples/formulas/quadratic.txt",
+        "--rules", "all", "--name", "roots",
+    ],
     "time": ["time", "a*x^3 + b*x^2 + c*x + d", "--rules", "all"],
     "fuzz": ["fuzz", "--rules", "safe", "--count", "400", "--samples", "200"],
     "rules": ["rules"],

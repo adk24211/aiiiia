@@ -235,6 +235,19 @@ That is what makes `u / w + v / w` worth turning into `(u + v) / w`, and
 `exp(a) * exp(b)` worth turning into `exp(a + b)`: both trade an expensive
 operation for a cheap one, and neither is smaller.
 
+### Several expressions at once
+
+Extraction generalizes to a *set* of roots with no new machinery: build them
+into one expression sharing a memo, and let the refinement pass price every
+class any of them materializes at zero. A subterm two outputs use is then free
+for the second one, which is exactly the accounting that makes sharing happen
+at extraction rather than only where the input happened to be written with a
+common subterm.
+
+`src/bundle.rs` is the input side of that, and the emitter grew a multi-output
+form per language. Both roots of a quadratic, written with every subterm
+repeated, come out with one square root and one reciprocal between them.
+
 ### The honest caveat
 
 Minimizing cost over the expression *tree* is what the fixpoint solves
@@ -243,6 +256,39 @@ twice only once, which is what actually gets emitted — is a different problem,
 and it is NP-hard. `DagExtractor` takes a greedy pass at it and says so in its
 documentation. Where the two disagree, `saturn` reports DAG cost in the CLI,
 because that is the number that corresponds to work the machine does.
+
+## Where the time goes
+
+Profiling a run over large generated expressions with the full rule set said
+search was 68% and rebuilding 31%, at 114 nanoseconds per matcher call. Three
+things were wrong, and none of them was the algorithm:
+
+**The union-find was not compressed during matching.** `find` compresses as it
+walks, but only through `&mut self`, and matching holds the graph immutably
+while calling `find` tens of millions of times. One linear compression pass
+after each rebuild turns every one of those from a walk up a parent chain into
+an array read.
+
+**E-node children lived in a `Vec`.** Arity is bounded by the language, so
+there was nothing to allocate — and the e-graph clones e-nodes constantly,
+since every rebuild re-derives the parent lists from them. Inline children
+removed a heap allocation per clone.
+
+**A class's nodes were filtered rather than searched.** They are sorted and
+`ENode` orders by operator first, so the nodes that can match a pattern are a
+contiguous run that binary search finds.
+
+Together: 2.1x, and 114ns to 61ns per matcher call. Smaller wins came from
+indexing classes by the operators they contain, deduplicating parent lists as
+they are built rather than sorting afterwards, and a non-cryptographic hasher
+for keys the engine built itself.
+
+What is left is the shape of the matcher. It makes 48 million calls to produce
+1.4 million substitutions: it rediscovers the same failures over and over,
+because each pattern is walked independently from scratch. Fixing that means
+compiling patterns into a machine that shares work between them, which is a
+larger change than any of the above and is not here. `examples/profile.rs` is
+the harness, kept so the next person to ask does not have to write it again.
 
 ## Limits that actually limit
 

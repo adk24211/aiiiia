@@ -1,0 +1,7 @@
+# Both roots of a quadratic. The discriminant and the reciprocal of 2a are
+# shared between them, and the rules find the shared form on their own -- the
+# input repeats every subterm.
+#
+#     saturn emit --file examples/formulas/quadratic.txt --rules all --name roots
+lo = (-b - sqrt(b * b - 4 * a * c)) / (2 * a)
+hi = (-b + sqrt(b * b - 4 * a * c)) / (2 * a)
