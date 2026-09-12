@@ -117,7 +117,7 @@ impl Analysis for MathAnalysis {
     type Data = MathData;
 
     fn make(egraph: &EGraph<Self>, node: &ENode) -> MathData {
-        let child = |i: usize| egraph[node.children[i]].data;
+        let child = |i: usize| egraph[node.children()[i]].data;
 
         // -- constant folding ------------------------------------------------
         let constant = (|| -> Option<F> {
@@ -130,8 +130,8 @@ impl Analysis for MathAnalysis {
             if is_transcendental(node.op) && !egraph.analysis.fold_transcendental {
                 return None;
             }
-            let mut args = Vec::with_capacity(node.children.len());
-            for i in 0..node.children.len() {
+            let mut args = Vec::with_capacity(node.children().len());
+            for i in 0..node.children().len() {
                 args.push(child(i).value()?);
             }
             let v = node.op.eval(&args)?;

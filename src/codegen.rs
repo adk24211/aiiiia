@@ -78,7 +78,7 @@ impl<'a> Emitter<'a> {
         // to name, so those stay inline however often they appear.
         for id in self.expr.reachable(root) {
             let node = self.expr.node(id);
-            if id == root || node.children.is_empty() || counts[id.index()] <= 1 {
+            if id == root || node.children().is_empty() || counts[id.index()] <= 1 {
                 continue;
             }
             let text = self.render(id, 0);
@@ -141,7 +141,7 @@ impl<'a> Emitter<'a> {
             return name.clone();
         }
         let node = self.expr.node(id);
-        let c = |i: usize, prec: u8| self.render(node.children[i], prec);
+        let c = |i: usize, prec: u8| self.render(node.children()[i], prec);
 
         let (text, prec) = match node.op {
             Op::Const(v) => (self.literal(v), 10),
@@ -193,7 +193,7 @@ impl<'a> Emitter<'a> {
             }
 
             Op::If => {
-                let cond = self.truthy(node.children[0]);
+                let cond = self.truthy(node.children()[0]);
                 match self.lang {
                     Lang::C => (format!("({} ? {} : {})", cond, c(1, 0), c(2, 0)), 10),
                     Lang::Rust => (
@@ -215,7 +215,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn unary_call(&self, op: Op, id: Id) -> String {
-        let arg = self.render(self.expr.node(id).children[0], 0);
+        let arg = self.render(self.expr.node(id).children()[0], 0);
         let c_name = match op {
             Op::Sqrt => "sqrt",
             Op::Ln => "log",
@@ -255,8 +255,8 @@ impl<'a> Emitter<'a> {
     fn minmax(&self, op: Op, id: Id) -> String {
         let node = self.expr.node(id);
         let (a, b) = (
-            self.render(node.children[0], 0),
-            self.render(node.children[1], 0),
+            self.render(node.children()[0], 0),
+            self.render(node.children()[1], 0),
         );
         let is_min = op == Op::Min;
         format!(
@@ -334,7 +334,7 @@ impl<'a> Emitter<'a> {
             return None;
         }
         let node = self.expr.node(id);
-        let kids = &node.children;
+        let kids = node.children();
         Some(match node.op {
             Op::Lt | Op::Le | Op::Gt | Op::Ge | Op::Eq | Op::Ne => {
                 let op = match node.op {

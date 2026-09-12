@@ -264,8 +264,8 @@ fn fold(node: &crate::lang::ENode, known: &HashMap<Id, f64>) -> Option<f64> {
     if !node.op.is_foldable() {
         return None;
     }
-    let mut args = Vec::with_capacity(node.children.len());
-    for &c in &node.children {
+    let mut args = Vec::with_capacity(node.children().len());
+    for &c in node.children() {
         args.push(*known.get(&c)?);
     }
     node.op.eval(&args)
@@ -366,7 +366,7 @@ impl<'a> Compiler<'a> {
             if self.value_of.contains_key(&id) {
                 continue;
             }
-            for &c in &self.expr.node(id).children {
+            for &c in self.expr.node(id).children() {
                 needed.insert(c);
             }
         }
@@ -386,7 +386,7 @@ impl<'a> Compiler<'a> {
             if self.value_of.contains_key(&id) {
                 continue;
             }
-            for &c in &self.expr.node(id).children {
+            for &c in self.expr.node(id).children() {
                 if position.contains_key(&c) {
                     last_use.insert(c, i);
                 }
@@ -395,7 +395,7 @@ impl<'a> Compiler<'a> {
 
         // Pass two: emit.
         for (i, id) in emitted.iter().copied().enumerate() {
-            let node = self.expr.node(id).clone();
+            let node = *self.expr.node(id);
             let dst = match self.value_of.get(&id).copied() {
                 Some(v) => {
                     let k = self.intern_const(v)?;
@@ -412,7 +412,7 @@ impl<'a> Compiler<'a> {
             // twice, and freeing its slot twice would hand it to two different
             // nodes at once.
             let mut dead: Vec<Id> = node
-                .children
+                .children()
                 .iter()
                 .copied()
                 .filter(|c| last_use.get(c) == Some(&i) && *c != root)
@@ -443,7 +443,7 @@ impl<'a> Compiler<'a> {
         // happens after the reads are recorded, and freeing is deferred to the
         // caller, so this cannot happen here anyway.
         let operands: Vec<u16> = node
-            .children
+            .children()
             .iter()
             .map(|c| {
                 self.slot_of

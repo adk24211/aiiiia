@@ -14,6 +14,11 @@ use crate::sym::Sym;
 use std::fmt;
 
 /// A variable binding produced by matching.
+///
+/// Kept sorted by variable, which makes two substitutions comparable by a
+/// plain slice comparison. The matcher deduplicates the substitutions a
+/// commutative retry produces twice, and that comparison happens often enough
+/// that it must not allocate.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Subst {
     bindings: Vec<(Sym, Id)>,
@@ -34,10 +39,8 @@ impl Subst {
         match self.bindings.iter_mut().find(|(s, _)| *s == v) {
             Some(slot) => slot.1 = id,
             None => {
-                self.bindings.push((v, id));
-                // Keeping bindings sorted makes `Subst` comparable, which is
-                // what lets the matcher deduplicate its results.
-                self.bindings.sort();
+                let at = self.bindings.partition_point(|(s, _)| *s < v);
+                self.bindings.insert(at, (v, id));
             }
         }
     }
@@ -59,7 +62,6 @@ impl Subst {
         for (_, id) in self.bindings.iter_mut() {
             *id = egraph.find(*id);
         }
-        self.bindings.sort();
     }
 }
 
@@ -178,7 +180,7 @@ impl Pattern {
                     }
                     PatNode::Var(s)
                 }
-                _ => PatNode::Op(n.op, n.children.iter().map(|c| map[c]).collect()),
+                _ => PatNode::Op(n.op, n.children().iter().map(|c| map[c]).collect()),
             };
             map.insert(id, nodes.len());
             nodes.push(pat);
@@ -270,21 +272,22 @@ impl Pattern {
         egraph: &EGraph<A>,
         cap: usize,
     ) -> (Vec<SearchMatches>, bool) {
-        let root_op = self.root_op();
         let mut out = Vec::new();
         let mut total = 0usize;
         let mut budget = Budget::new(MAX_MATCH_STEPS);
-        for class in egraph.classes() {
-            // Skip classes that cannot possibly contain the root operator.
-            if let Some(op) = root_op {
-                if !class.nodes.iter().any(|n| n.op == op) {
-                    continue;
-                }
-            }
+
+        // Only classes containing the pattern's root operator can match. The
+        // index answers that directly; without it every rule would walk the
+        // whole graph on every iteration just to discard most of it.
+        let candidates: Vec<Id> = match self.root_op().and_then(|op| egraph.classes_with(op)) {
+            Some(ids) => ids.to_vec(),
+            None => egraph.classes().map(|c| c.id).collect(),
+        };
+        for id in candidates {
             if total >= cap || budget.exhausted {
                 return (out, true);
             }
-            if let Some(m) = self.search_eclass_within(egraph, class.id, &mut budget) {
+            if let Some(m) = self.search_eclass_within(egraph, id, &mut budget) {
                 total += m.len();
                 out.push(m);
             }
@@ -323,10 +326,14 @@ impl Pattern {
                 }
             }
             PatNode::Op(op, pat_children) => {
-                for node in &egraph[class].nodes {
-                    if node.op != *op {
-                        continue;
-                    }
+                // A class's nodes are sorted, and `ENode` orders by operator
+                // first, so the ones that can match are a contiguous run.
+                // Scanning past the rest is the difference between linear and
+                // logarithmic in the size of a large class.
+                let nodes = &egraph[class].nodes;
+                let start = nodes.partition_point(|n| n.op < *op);
+                let end = start + nodes[start..].partition_point(|n| n.op == *op);
+                for node in &nodes[start..end] {
                     if budget.exhausted {
                         return;
                     }
@@ -337,7 +344,7 @@ impl Pattern {
                     self.match_children(
                         egraph,
                         pat_children,
-                        &node.children,
+                        node.children(),
                         subst.clone(),
                         out,
                         budget,
@@ -345,10 +352,10 @@ impl Pattern {
                     // Commutative nodes are stored with their children in a
                     // canonical order, so the matcher must try the other one.
                     if op.is_commutative()
-                        && node.children.len() == 2
-                        && node.children[0] != node.children[1]
+                        && node.children().len() == 2
+                        && node.children()[0] != node.children()[1]
                     {
-                        let swapped = [node.children[1], node.children[0]];
+                        let swapped = [node.children()[1], node.children()[0]];
                         self.match_children(
                             egraph,
                             pat_children,
@@ -411,7 +418,7 @@ impl Pattern {
                     )
                 }),
                 PatNode::Op(op, children) => {
-                    let cs = children.iter().map(|&c| ids[c]).collect();
+                    let cs: Vec<Id> = children.iter().map(|&c| ids[c]).collect();
                     egraph.add(ENode::new(*op, cs))
                 }
             };

@@ -60,7 +60,7 @@ pub fn eval_at(expr: &RecExpr, root: Id, env: &Env) -> Result<f64, EvalError> {
             Op::Var(s) => *env.get(&s).ok_or(EvalError::Unbound(s))?,
             Op::Diff => return Err(EvalError::UnreducedDiff),
             op => {
-                let args: Vec<f64> = n.children.iter().map(|c| vals[c]).collect();
+                let args: Vec<f64> = n.children().iter().map(|c| vals[c]).collect();
                 op.eval(&args).ok_or(EvalError::UnreducedDiff)?
             }
         };

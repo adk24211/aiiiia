@@ -87,7 +87,7 @@ impl Analysis for VarCount {
         if node.as_var().is_some() {
             1
         } else {
-            node.children.iter().map(|&c| egraph[c].data).sum()
+            node.children().iter().map(|&c| egraph[c].data).sum()
         }
     }
 

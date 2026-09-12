@@ -224,10 +224,10 @@ mod tests {
             // Children always precede their parent, which is what lets a
             // single forward pass evaluate the whole DAG.
             for (i, n) in e.nodes().iter().enumerate() {
-                for c in &n.children {
+                for c in n.children() {
                     assert!(c.index() < i);
                 }
-                assert_eq!(n.op.arity(), n.children.len());
+                assert_eq!(n.op.arity(), n.children().len());
             }
             assert_eq!(e.root().index(), e.len() - 1);
         }
@@ -256,7 +256,7 @@ mod tests {
             for id in e.reachable(e.root()) {
                 let n = e.node(id);
                 if n.op == Op::Diff {
-                    assert!(e.node(n.children[0]).as_var().is_some());
+                    assert!(e.node(n.children()[0]).as_var().is_some());
                 }
             }
         }

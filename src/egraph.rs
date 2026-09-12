@@ -14,6 +14,7 @@
 
 use crate::analysis::Analysis;
 use crate::explain::{Explanation, Justification, Step};
+use crate::fxhash::{FxHashMap, FxHashSet};
 use crate::lang::{ENode, Id, Op, RecExpr};
 use crate::unionfind::UnionFind;
 use std::collections::{HashMap, HashSet};
@@ -81,7 +82,7 @@ pub struct EGraph<A: Analysis> {
     unionfind: UnionFind,
     /// Canonical e-node -> id of the class containing it. Values may be stale
     /// and must be passed through `find`.
-    memo: HashMap<ENode, Id>,
+    memo: FxHashMap<ENode, Id>,
     /// Indexed by raw id; `Some` exactly at canonical ids.
     classes: Vec<Option<EClass<A::Data>>>,
     /// Classes whose parents may have lost congruence.
@@ -92,6 +93,11 @@ pub struct EGraph<A: Analysis> {
     /// pair of rules, so these must not cost a scan of the whole graph.
     node_count: usize,
     class_count: usize,
+    /// Classes containing at least one node with a given operator, rebuilt
+    /// with the rest of the derived indices. E-matching starts by asking for
+    /// the classes that could possibly contain a pattern's root, and without
+    /// this it would scan the whole graph once per rule per iteration.
+    by_op: FxHashMap<Op, Vec<Id>>,
     /// Every union performed, with its reason. `None` unless explanations were
     /// asked for: the list grows with the number of unions, which is much
     /// larger than the number of classes.
@@ -112,12 +118,13 @@ impl<A: Analysis> EGraph<A> {
         EGraph {
             analysis,
             unionfind: UnionFind::new(),
-            memo: HashMap::new(),
+            memo: FxHashMap::default(),
             classes: Vec::new(),
             pending: Vec::new(),
             analysis_pending: Vec::new(),
             node_count: 0,
             class_count: 0,
+            by_op: FxHashMap::default(),
             history: None,
             reason: Justification::Asserted,
             clean: true,
@@ -214,6 +221,15 @@ impl<A: Analysis> EGraph<A> {
         self.classes().map(|c| c.id).collect()
     }
 
+    /// The classes that contain a node with this operator, ascending.
+    ///
+    /// Valid only on a clean graph; while the graph is dirty the caller has to
+    /// consider every class, because the index has not been rebuilt.
+    pub fn classes_with(&self, op: Op) -> Option<&[Id]> {
+        self.clean
+            .then(|| self.by_op.get(&op).map(|v| v.as_slice()).unwrap_or(&[]))
+    }
+
     /// The class containing `id`.
     pub fn class(&self, id: Id) -> &EClass<A::Data> {
         let id = self.find(id);
@@ -269,20 +285,20 @@ impl<A: Analysis> EGraph<A> {
         debug_assert_eq!(id.index(), self.classes.len());
         self.classes.push(Some(EClass {
             id,
-            nodes: vec![node.clone()],
+            nodes: vec![node],
             data,
             parents: Vec::new(),
         }));
 
         // Record this node as a parent of each of its children's classes, so
         // that unioning a child can find the nodes that must stay congruent.
-        for &child in &node.children {
+        for &child in node.children() {
             let c = self.find(child);
             self.classes[c.index()]
                 .as_mut()
                 .expect("child class")
                 .parents
-                .push((node.clone(), id));
+                .push((node, id));
         }
 
         self.memo.insert(node, id);
@@ -314,7 +330,7 @@ impl<A: Analysis> EGraph<A> {
         for (i, n) in expr.nodes().iter().enumerate() {
             let id = self.add(ENode::new(
                 n.op,
-                n.children.iter().map(|c| map[c]).collect(),
+                n.children().iter().map(|c| map[c]).collect::<Vec<_>>(),
             ));
             map.insert(Id::new(i), id);
             last = Some(id);
@@ -512,6 +528,7 @@ impl<A: Analysis> EGraph<A> {
                 break;
             }
         }
+        self.unionfind.compress_all();
         self.reindex();
         self.clean = true;
         debug_assert!(self.pending.is_empty());
@@ -554,13 +571,14 @@ impl<A: Analysis> EGraph<A> {
         // Keyed by the canonical form, but the *stored* form is kept beside
         // it: an explanation of a congruence has to name the two nodes as they
         // were, since their children are what the derivation continues into.
-        let mut seen: HashMap<ENode, (Id, ENode)> = HashMap::with_capacity(parents.len());
+        let mut seen: FxHashMap<ENode, (Id, ENode)> =
+            FxHashMap::with_capacity_and_hasher(parents.len(), Default::default());
         for (stored, owner) in parents {
             let node = self.canonicalize(&stored);
             let owner = self.find_mut(owner);
             match seen.get(&node) {
                 Some((existing, other)) => {
-                    let (existing, other) = (*existing, other.clone());
+                    let (existing, other) = (*existing, *other);
                     let reason = Justification::Congruence {
                         left: other,
                         right: stored,
@@ -570,11 +588,11 @@ impl<A: Analysis> EGraph<A> {
                     }
                     let root = self.find_mut(owner);
                     let (_, keep) = seen.remove(&node).expect("just looked it up");
-                    seen.insert(node.clone(), (root, keep));
+                    seen.insert(node, (root, keep));
                     self.memo.insert(node, root);
                 }
                 None => {
-                    seen.insert(node.clone(), (owner, stored));
+                    seen.insert(node, (owner, stored));
                     self.memo.insert(node, owner);
                 }
             }
@@ -598,12 +616,12 @@ impl<A: Analysis> EGraph<A> {
     /// no explanation — hiding exactly the work the reader is asking about.
     fn pair_arguments(&self, left: &ENode, right: &ENode) -> Vec<(Id, Id)> {
         let straight: Vec<(Id, Id)> = left
-            .children
+            .children()
             .iter()
             .copied()
-            .zip(right.children.iter().copied())
+            .zip(right.children().iter().copied())
             .collect();
-        if !left.op.is_commutative() || left.children.len() != 2 {
+        if !left.op.is_commutative() || left.children().len() != 2 {
             return straight;
         }
         let agrees = |pairs: &[(Id, Id)]| pairs.iter().all(|(x, y)| self.find(*x) == self.find(*y));
@@ -611,8 +629,8 @@ impl<A: Analysis> EGraph<A> {
             return straight;
         }
         let swapped = vec![
-            (left.children[0], right.children[1]),
-            (left.children[1], right.children[0]),
+            (left.children()[0], right.children()[1]),
+            (left.children()[1], right.children()[0]),
         ];
         if agrees(&swapped) {
             swapped
@@ -702,41 +720,47 @@ impl<A: Analysis> EGraph<A> {
     fn reindex(&mut self) {
         let ids = self.class_ids();
 
+        let mut node_count = 0usize;
         for &id in &ids {
             let mut nodes = std::mem::take(&mut self.class_mut(id).nodes);
             for n in nodes.iter_mut() {
                 *n = self.canonicalize(n);
             }
-            nodes.sort();
+            nodes.sort_unstable();
             nodes.dedup();
-            self.class_mut(id).nodes = nodes;
-            self.class_mut(id).parents.clear();
+            node_count += nodes.len();
+            let class = self.classes[id.index()].as_mut().expect("class");
+            class.nodes = nodes;
+            class.parents.clear();
         }
+        self.node_count = node_count;
 
-        self.node_count = ids
-            .iter()
-            .map(|id| {
-                self.classes[id.index()]
-                    .as_ref()
-                    .expect("class")
-                    .nodes
-                    .len()
-            })
-            .sum();
         self.memo.clear();
-        self.memo.reserve(self.node_count);
-        let mut parents: Vec<(Id, ENode, Id)> = Vec::new();
+        self.memo.reserve(node_count);
+        self.by_op.clear();
+        // (child class, the node referring to it, the class holding that node)
+        let mut parents: Vec<(Id, ENode, Id)> = Vec::with_capacity(node_count * 2);
         for &id in &ids {
-            let nodes = self.classes[id.index()]
-                .as_ref()
-                .expect("class")
-                .nodes
-                .clone();
-            for n in nodes {
-                for &child in &n.children {
-                    parents.push((self.find(child), n.clone(), id));
+            let class = self.classes[id.index()].as_ref().expect("class");
+            let mut last_op: Option<Op> = None;
+            for n in &class.nodes {
+                // Class nodes are sorted and `ENode` orders by operator first,
+                // so distinct operators arrive in runs.
+                if last_op != Some(n.op) {
+                    last_op = Some(n.op);
+                    self.by_op.entry(n.op).or_default().push(id);
                 }
-                self.memo.insert(n, id);
+                for (k, &child) in n.children().iter().enumerate() {
+                    let child = self.find(child);
+                    // `x * x` names one class twice, and the parent list is a
+                    // set. Checking the handful of earlier children is cheaper
+                    // than sorting the whole list afterwards to deduplicate it.
+                    if n.children()[..k].iter().any(|&e| self.find(e) == child) {
+                        continue;
+                    }
+                    parents.push((child, *n, id));
+                }
+                self.memo.insert(*n, id);
             }
         }
         for (child, node, owner) in parents {
@@ -745,11 +769,6 @@ impl<A: Analysis> EGraph<A> {
                 .expect("child class")
                 .parents
                 .push((node, owner));
-        }
-        for &id in &ids {
-            let p = &mut self.classes[id.index()].as_mut().expect("class").parents;
-            p.sort();
-            p.dedup();
         }
     }
 
@@ -777,7 +796,7 @@ impl<A: Analysis> EGraph<A> {
         }
 
         // Every node in every class is canonical and hashconsed to that class.
-        let mut node_owner: HashMap<ENode, Id> = HashMap::new();
+        let mut node_owner: FxHashMap<ENode, Id> = FxHashMap::default();
         for class in self.classes() {
             for n in &class.nodes {
                 assert_eq!(
@@ -794,7 +813,7 @@ impl<A: Analysis> EGraph<A> {
                         n, other, class.id
                     );
                 }
-                node_owner.insert(n.clone(), class.id);
+                node_owner.insert(*n, class.id);
                 let found = self.memo.get(n).unwrap_or_else(|| {
                     panic!("node {:?} of class {:?} missing from memo", n, class.id)
                 });
@@ -826,18 +845,18 @@ impl<A: Analysis> EGraph<A> {
         // Parent lists are exactly the set of (node, owner) pairs implied by
         // the classes. A linear scan per node would be quadratic on a large
         // graph, so compare the two sets directly.
-        let mut expected: HashSet<(Id, ENode, Id)> = HashSet::new();
+        let mut expected: FxHashSet<(Id, ENode, Id)> = FxHashSet::default();
         for class in self.classes() {
             for n in &class.nodes {
-                for &child in &n.children {
-                    expected.insert((self.find(child), n.clone(), class.id));
+                for &child in n.children() {
+                    expected.insert((self.find(child), *n, class.id));
                 }
             }
         }
-        let mut actual: HashSet<(Id, ENode, Id)> = HashSet::new();
+        let mut actual: FxHashSet<(Id, ENode, Id)> = FxHashSet::default();
         for class in self.classes() {
             for (n, owner) in &class.parents {
-                actual.insert((class.id, n.clone(), self.find(*owner)));
+                actual.insert((class.id, *n, self.find(*owner)));
             }
         }
         if let Some(missing) = expected.difference(&actual).next() {
@@ -885,7 +904,7 @@ impl<A: Analysis> EGraph<A> {
         }
         for class in self.classes() {
             for (i, n) in class.nodes.iter().enumerate() {
-                for (k, &child) in n.children.iter().enumerate() {
+                for (k, &child) in n.children().iter().enumerate() {
                     let c = self.find(child);
                     s.push_str(&format!(
                         "  n{}_{} -> n{}_0 [lhead=cluster_{}, label=\"{}\"]\n",

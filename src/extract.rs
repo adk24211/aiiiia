@@ -26,7 +26,7 @@ pub struct AstSize;
 
 impl CostFunction for AstSize {
     fn cost(&self, node: &ENode, child_cost: &dyn Fn(Id) -> f64) -> f64 {
-        1.0 + node.children.iter().map(|&c| child_cost(c)).sum::<f64>()
+        1.0 + node.children().iter().map(|&c| child_cost(c)).sum::<f64>()
     }
 }
 
@@ -38,7 +38,7 @@ pub struct AstDepth;
 impl CostFunction for AstDepth {
     fn cost(&self, node: &ENode, child_cost: &dyn Fn(Id) -> f64) -> f64 {
         1.0 + node
-            .children
+            .children()
             .iter()
             .map(|&c| child_cost(c))
             .fold(0.0, f64::max)
@@ -80,7 +80,7 @@ impl CostFunction for OpCost {
         // Leaves are free, but a class must still cost something for the
         // fixpoint to order it, so charge a token amount.
         let own = OpCost::of(node.op).max(0.125);
-        own + node.children.iter().map(|&c| child_cost(c)).sum::<f64>()
+        own + node.children().iter().map(|&c| child_cost(c)).sum::<f64>()
     }
 }
 
@@ -118,7 +118,7 @@ fn solve<A: Analysis, C: CostFunction>(
             let mut current: Option<(f64, ENode)> = None;
             for node in &class.nodes {
                 let mut known = true;
-                for &c in &node.children {
+                for &c in node.children() {
                     let c = egraph.find(c);
                     if !free.contains(&c) && !best.contains_key(&c) {
                         known = false;
@@ -138,7 +138,7 @@ fn solve<A: Analysis, C: CostFunction>(
                 };
                 let c = cost_fn.cost(node, &lookup);
                 if current.as_ref().map(|(bc, _)| c < *bc).unwrap_or(true) {
-                    current = Some((c, node.clone()));
+                    current = Some((c, *node));
                 }
             }
             let Some((c, node)) = current else { continue };
@@ -181,8 +181,8 @@ fn build_from<A: Analysis>(egraph: &EGraph<A>, selection: &Selection, root: Id) 
         }
         on_stack.push(class);
         let node = &selection.get(&class)?.1;
-        let mut children = Vec::with_capacity(node.children.len());
-        for &c in &node.children {
+        let mut children = Vec::with_capacity(node.children().len());
+        for &c in node.children() {
             children.push(go(egraph, selection, c, expr, memo, on_stack)?);
         }
         on_stack.pop();
@@ -214,7 +214,7 @@ fn materialized<A: Analysis>(egraph: &EGraph<A>, selection: &Selection, root: Id
             continue;
         }
         if let Some((_, node)) = selection.get(&c) {
-            for &child in &node.children {
+            for &child in node.children() {
                 stack.push(egraph.find(child));
             }
         }

@@ -341,29 +341,53 @@ impl Op {
 // ENode
 // ---------------------------------------------------------------------------
 
+/// The most children any operator takes. `if` is the only ternary one, and
+/// the language has no variadic operators.
+pub const MAX_ARITY: usize = 3;
+
 /// An operator applied to a list of child ids.
 ///
 /// Inside an e-graph the children are *e-class* ids; inside a [`RecExpr`] they
 /// are indices of earlier nodes in the array.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// The children live inline rather than in a `Vec`. The e-graph clones e-nodes
+/// constantly — every rebuild re-derives the parent lists from them — and a
+/// heap allocation per clone dominated the time a saturating run spent. Arity
+/// is bounded by the language, so there is nothing to allocate.
+#[derive(Clone, Copy)]
 pub struct ENode {
     pub op: Op,
-    pub children: Vec<Id>,
+    children: [Id; MAX_ARITY],
+    len: u8,
 }
 
 impl ENode {
-    pub fn new(op: Op, children: Vec<Id>) -> ENode {
+    pub fn new(op: Op, children: impl AsRef<[Id]>) -> ENode {
+        let children = children.as_ref();
         debug_assert_eq!(
             op.arity(),
             children.len(),
             "arity mismatch building {:?}",
             op
         );
-        ENode { op, children }
+        assert!(
+            children.len() <= MAX_ARITY,
+            "{:?} takes {} children; MAX_ARITY is {}",
+            op,
+            children.len(),
+            MAX_ARITY
+        );
+        let mut ids = [Id::new(0); MAX_ARITY];
+        ids[..children.len()].copy_from_slice(children);
+        ENode {
+            op,
+            children: ids,
+            len: children.len() as u8,
+        }
     }
 
     pub fn leaf(op: Op) -> ENode {
-        ENode::new(op, Vec::new())
+        ENode::new(op, [])
     }
 
     pub fn constant(x: f64) -> ENode {
@@ -376,12 +400,12 @@ impl ENode {
 
     #[inline]
     pub fn children(&self) -> &[Id] {
-        &self.children
+        &self.children[..self.len as usize]
     }
 
     #[inline]
     pub fn children_mut(&mut self) -> &mut [Id] {
-        &mut self.children
+        &mut self.children[..self.len as usize]
     }
 
     /// The constant this node holds, if it is a literal.
@@ -404,29 +428,57 @@ impl ENode {
 
     /// Rewrite every child id through `f`, in place.
     pub fn update_children(&mut self, mut f: impl FnMut(Id) -> Id) {
-        for c in self.children.iter_mut() {
+        for c in self.children_mut() {
             *c = f(*c);
         }
     }
 
     /// A copy of this node with every child id mapped through `f`.
     pub fn map_children(&self, mut f: impl FnMut(Id) -> Id) -> ENode {
-        ENode {
-            op: self.op,
-            children: self.children.iter().map(|&c| f(c)).collect(),
+        let mut out = *self;
+        for c in out.children_mut() {
+            *c = f(*c);
         }
+        out
     }
 
     /// Sort the children of a commutative operator so that `a + b` and `b + a`
     /// hashcons to the same node. This is what makes commutativity free rather
     /// than a rewrite rule that doubles the e-graph.
     pub fn normalize(&mut self) {
-        if self.op.is_commutative()
-            && self.children.len() == 2
-            && self.children[0] > self.children[1]
-        {
+        if self.op.is_commutative() && self.len == 2 && self.children[0] > self.children[1] {
             self.children.swap(0, 1);
         }
+    }
+}
+
+// Equality, ordering and hashing look only at the children that exist; the
+// slots past `len` hold whatever was there when the node was built.
+impl PartialEq for ENode {
+    fn eq(&self, other: &ENode) -> bool {
+        self.op == other.op && self.children() == other.children()
+    }
+}
+impl Eq for ENode {}
+
+impl PartialOrd for ENode {
+    fn partial_cmp(&self, other: &ENode) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ENode {
+    fn cmp(&self, other: &ENode) -> std::cmp::Ordering {
+        self.op
+            .cmp(&other.op)
+            .then_with(|| self.children().cmp(other.children()))
+    }
+}
+
+impl std::hash::Hash for ENode {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.op.hash(state);
+        self.children().hash(state);
     }
 }
 
@@ -435,10 +487,10 @@ impl fmt::Debug for ENode {
         match self.op {
             Op::Const(c) => write!(f, "{}", c),
             Op::Var(s) => write!(f, "{}", s),
-            op if self.children.is_empty() => write!(f, "({})", op.name()),
+            op if self.children().is_empty() => write!(f, "({})", op.name()),
             op => {
                 write!(f, "({}", op.name())?;
-                for c in &self.children {
+                for c in self.children() {
                     write!(f, " {:?}", c)?;
                 }
                 write!(f, ")")
@@ -472,7 +524,7 @@ impl RecExpr {
     /// identical node is already present, its existing id is returned instead.
     pub fn add(&mut self, mut node: ENode) -> Id {
         node.normalize();
-        for &c in &node.children {
+        for &c in node.children() {
             assert!(
                 c.index() < self.nodes.len(),
                 "RecExpr::add: child {:?} is not yet in the expression",
@@ -483,7 +535,7 @@ impl RecExpr {
             return id;
         }
         let id = Id::new(self.nodes.len());
-        self.memo.insert(node.clone(), id);
+        self.memo.insert(node, id);
         self.nodes.push(node);
         id
     }
@@ -540,7 +592,7 @@ impl RecExpr {
         let mut sizes: Vec<u128> = Vec::with_capacity(self.nodes.len());
         for n in &self.nodes {
             let s = 1 + n
-                .children
+                .children()
                 .iter()
                 .map(|c| sizes[c.index()])
                 .fold(0u128, |a, b| a.saturating_add(b));
@@ -558,7 +610,7 @@ impl RecExpr {
                 continue;
             }
             seen[x.index()] = true;
-            stack.extend_from_slice(&self.nodes[x.index()].children);
+            stack.extend_from_slice(self.nodes[x.index()].children());
         }
         (0..self.nodes.len())
             .filter(|&i| seen[i])
@@ -570,7 +622,7 @@ impl RecExpr {
     pub fn ref_counts(&self, root: Id) -> Vec<u32> {
         let mut counts = vec![0u32; self.nodes.len()];
         for id in self.reachable(root) {
-            for &c in &self.nodes[id.index()].children {
+            for &c in self.nodes[id.index()].children() {
                 counts[c.index()] += 1;
             }
         }
@@ -598,7 +650,7 @@ impl RecExpr {
             let n = &self.nodes[id.index()];
             let new = out.add(ENode::new(
                 n.op,
-                n.children.iter().map(|c| map[c]).collect(),
+                n.children().iter().map(|c| map[c]).collect::<Vec<_>>(),
             ));
             map.insert(id, new);
         }
@@ -619,7 +671,7 @@ impl RecExpr {
             Op::Var(s) => s.to_string(),
             op => {
                 let mut s = format!("({}", op.name());
-                for &c in &n.children {
+                for &c in n.children() {
                     s.push(' ');
                     s.push_str(&self.sexp_of(c));
                 }
@@ -654,7 +706,7 @@ impl RecExpr {
         let mut next = 0usize;
         for id in self.reachable(root) {
             let n = self.node(id);
-            let trivial = n.children.is_empty();
+            let trivial = n.children().is_empty();
             if counts[id.index()] > 1 && !trivial && id != root {
                 names.insert(id, format!("t{}", next));
                 next += 1;
@@ -714,7 +766,7 @@ impl RecExpr {
                     out.push('(');
                 }
                 out.push('-');
-                self.write_infix(n.children[0], prec, bound, out);
+                self.write_infix(n.children()[0], prec, bound, out);
                 if paren {
                     out.push(')');
                 }
@@ -726,7 +778,7 @@ impl RecExpr {
                     out.push('(');
                 }
                 out.push('!');
-                self.write_infix(n.children[0], prec, bound, out);
+                self.write_infix(n.children()[0], prec, bound, out);
                 if paren {
                     out.push(')');
                 }
@@ -742,11 +794,11 @@ impl RecExpr {
                 } else {
                     (prec, prec + 1)
                 };
-                self.write_infix(n.children[0], lp, bound, out);
+                self.write_infix(n.children()[0], lp, bound, out);
                 out.push(' ');
                 out.push_str(op.name());
                 out.push(' ');
-                self.write_infix(n.children[1], rp, bound, out);
+                self.write_infix(n.children()[1], rp, bound, out);
                 if paren {
                     out.push(')');
                 }
@@ -754,7 +806,7 @@ impl RecExpr {
             op => {
                 out.push_str(op.name());
                 out.push('(');
-                for (i, &c) in n.children.iter().enumerate() {
+                for (i, &c) in n.children().iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }

@@ -70,6 +70,19 @@ impl UnionFind {
         (ra, rb)
     }
 
+    /// Point every element directly at its root.
+    ///
+    /// `find` compresses as it goes, but only through `&mut self`. Matching
+    /// holds the graph immutably and calls `find` on the order of tens of
+    /// millions of times per run, so one linear pass after each rebuild turns
+    /// all of those from a walk into an array read.
+    pub fn compress_all(&mut self) {
+        for i in 0..self.parents.len() {
+            let root = self.find(Id::new(i));
+            self.parents[i] = root;
+        }
+    }
+
     /// Number of distinct sets.
     pub fn set_count(&self) -> usize {
         (0..self.parents.len())

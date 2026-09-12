@@ -34,6 +34,7 @@ pub mod egraph;
 pub mod eval;
 pub mod explain;
 pub mod extract;
+pub mod fxhash;
 pub mod gen;
 pub mod interval;
 pub mod lang;

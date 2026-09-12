@@ -313,7 +313,7 @@ pub fn substitute(expr: &RecExpr, bindings: &HashMap<Sym, f64>) -> RecExpr {
         let n = expr.node(id);
         let new = match n.as_var() {
             Some(s) if bindings.contains_key(&s) => out.constant(bindings[&s]),
-            _ => out.op(n.op, n.children.iter().map(|c| map[c]).collect()),
+            _ => out.op(n.op, n.children().iter().map(|c| map[c]).collect()),
         };
         map.insert(id, new);
     }
