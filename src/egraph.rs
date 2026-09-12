@@ -338,6 +338,19 @@ impl<A: Analysis> EGraph<A> {
         last.expect("cannot add an empty expression")
     }
 
+    /// Add every node of `expr`, returning the class each one landed in.
+    ///
+    /// The index of the returned vector is the node's index in `expr`, so a
+    /// caller holding several roots into one expression can find all of them.
+    pub fn add_expr_mapped(&mut self, expr: &RecExpr) -> Vec<Id> {
+        let mut ids: Vec<Id> = Vec::with_capacity(expr.len());
+        for n in expr.nodes() {
+            let children: Vec<Id> = n.children().iter().map(|c| ids[c.index()]).collect();
+            ids.push(self.add(ENode::new(n.op, children)));
+        }
+        ids
+    }
+
     /// Add `expr` rooted at an arbitrary node rather than its last.
     pub fn add_expr_from(&mut self, expr: &RecExpr, root: Id) -> Id {
         let compacted = expr.compact(root);

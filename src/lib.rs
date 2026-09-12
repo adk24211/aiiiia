@@ -28,6 +28,7 @@
 
 pub mod analysis;
 pub mod assume;
+pub mod bundle;
 pub mod check;
 pub mod codegen;
 pub mod egraph;
@@ -51,6 +52,7 @@ pub mod vm;
 
 pub use analysis::{Analysis, MathAnalysis, MathData, NoAnalysis};
 pub use assume::Assumptions;
+pub use bundle::Bundle;
 pub use check::{Checker, Report};
 pub use codegen::{emit, Lang};
 pub use egraph::{EClass, EGraph, EGraphStats};
@@ -109,5 +111,46 @@ pub fn optimize_with<C: extract::CostFunction>(
         (best, runner)
     } else {
         (expr.clone(), runner)
+    }
+}
+
+/// Saturate every output of `bundle` together and extract them sharing one DAG.
+///
+/// Optimizing formulas one at a time throws away what they have in common.
+/// Here a subterm two outputs use is found once, extracted once, and emitted
+/// once. The result is never more expensive than the input, for the same
+/// reason [`optimize`] is not.
+pub fn optimize_bundle<C: extract::CostFunction>(
+    runner: Runner<MathAnalysis>,
+    bundle: &Bundle,
+    rules: &[Rewrite<MathAnalysis>],
+    cost_fn: C,
+) -> (Bundle, Runner<MathAnalysis>) {
+    if bundle.is_empty() {
+        return (bundle.clone(), runner.run(rules));
+    }
+    let mut runner = runner;
+    let mapped = runner.egraph.add_expr_mapped(&bundle.expr);
+    let roots: Vec<Id> = bundle
+        .outputs
+        .iter()
+        .map(|(_, id)| mapped[id.index()])
+        .collect();
+    runner.roots = roots.clone();
+    let runner = runner.run(rules);
+
+    let before = bundle.cost(&cost_fn);
+    let extractor = extract::DagExtractor::new(&runner.egraph, cost_fn);
+    match extractor.find_best_many(&roots) {
+        Some((cost, expr, ids)) if cost <= before => {
+            let outputs = bundle
+                .outputs
+                .iter()
+                .zip(ids)
+                .map(|((name, _), id)| (name.clone(), id))
+                .collect();
+            (Bundle { expr, outputs }, runner)
+        }
+        _ => (bundle.clone(), runner),
     }
 }

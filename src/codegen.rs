@@ -9,6 +9,7 @@
 //! language disagrees with this one: comparisons produce `0.0` or `1.0` rather
 //! than a boolean, and truthiness means "not zero and not NaN".
 
+use crate::bundle::Bundle;
 use crate::lang::{Id, Op, RecExpr};
 use crate::sym::F;
 use std::collections::HashMap;
@@ -48,10 +49,19 @@ impl fmt::Display for Lang {
 
 /// Emit `expr` as a function named `name`.
 pub fn emit(expr: &RecExpr, lang: Lang, name: &str) -> String {
-    Emitter::new(expr, lang).function(name)
+    emit_bundle(&Bundle::single(expr.clone()), lang, name)
+}
+
+/// Emit every output of `bundle` as one function.
+///
+/// The outputs share one DAG, so a subterm two of them use becomes one
+/// temporary computed once — which is the reason to optimize them together.
+pub fn emit_bundle(bundle: &Bundle, lang: Lang, name: &str) -> String {
+    Emitter::new(bundle, lang).function(name)
 }
 
 struct Emitter<'a> {
+    bundle: &'a Bundle,
     expr: &'a RecExpr,
     lang: Lang,
     /// Nodes bound to a temporary, and its name.
@@ -61,9 +71,10 @@ struct Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
-    fn new(expr: &'a RecExpr, lang: Lang) -> Emitter<'a> {
+    fn new(bundle: &'a Bundle, lang: Lang) -> Emitter<'a> {
         Emitter {
-            expr,
+            bundle,
+            expr: &bundle.expr,
             lang,
             bound: HashMap::new(),
             lets: Vec::new(),
@@ -71,14 +82,29 @@ impl<'a> Emitter<'a> {
     }
 
     fn function(mut self, name: &str) -> String {
-        let root = self.expr.root();
-        let counts = self.expr.ref_counts(root);
+        let reachable = self.bundle.reachable();
+        let single = self.bundle.outputs.len() == 1;
 
-        // Bind anything used more than once. A leaf is cheaper to repeat than
-        // to name, so those stay inline however often they appear.
-        for id in self.expr.reachable(root) {
+        // How many places read each node, counting each output as a reader.
+        // A node used once by each of two outputs is used twice, and naming it
+        // is the whole reason to emit them together.
+        let mut uses: HashMap<Id, usize> = HashMap::new();
+        for &id in &reachable {
+            for &c in self.expr.node(id).children() {
+                *uses.entry(c).or_insert(0) += 1;
+            }
+        }
+        for (_, id) in &self.bundle.outputs {
+            *uses.entry(*id).or_insert(0) += 1;
+        }
+
+        // Bind anything read more than once. A leaf is cheaper to repeat than
+        // to name, so those stay inline however often they appear. With one
+        // output its root is the return value and needs no name.
+        for id in reachable {
             let node = self.expr.node(id);
-            if id == root || node.children().is_empty() || counts[id.index()] <= 1 {
+            let is_sole_root = single && id == self.bundle.outputs[0].1;
+            if is_sole_root || node.children().is_empty() || uses[&id] <= 1 {
                 continue;
             }
             let text = self.render(id, 0);
@@ -86,50 +112,92 @@ impl<'a> Emitter<'a> {
             self.lets.push((temp.clone(), text));
             self.bound.insert(id, temp);
         }
-        let body = self.render(root, 0);
 
-        let params: Vec<String> = self.expr.vars().iter().map(|v| v.to_string()).collect();
+        let bodies: Vec<(String, String)> = self
+            .bundle
+            .outputs
+            .iter()
+            .map(|(out, id)| (out.clone(), self.render(*id, 0)))
+            .collect();
+        let params: Vec<String> = self.bundle.vars().iter().map(|v| v.to_string()).collect();
+
         let mut out = String::new();
         match self.lang {
             Lang::C => {
                 out.push_str("#include <math.h>\n\n");
                 out.push_str(&self.helpers());
-                let args = if params.is_empty() {
+                let mut args: Vec<String> =
+                    params.iter().map(|p| format!("double {}", p)).collect();
+                if !single {
+                    // Several results need somewhere to put them, and C has
+                    // no tuple.
+                    args.extend(bodies.iter().map(|(n, _)| format!("double *{}", n)));
+                }
+                let signature = if args.is_empty() {
                     "void".to_string()
                 } else {
-                    params
-                        .iter()
-                        .map(|p| format!("double {}", p))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    args.join(", ")
                 };
-                out.push_str(&format!("double {}({}) {{\n", name, args));
+                let returns = if single { "double" } else { "void" };
+                out.push_str(&format!("{} {}({}) {{\n", returns, name, signature));
                 for (t, v) in &self.lets {
                     out.push_str(&format!("    const double {} = {};\n", t, v));
                 }
-                out.push_str(&format!("    return {};\n}}\n", body));
+                if single {
+                    out.push_str(&format!("    return {};\n", bodies[0].1));
+                } else {
+                    for (out_name, body) in &bodies {
+                        out.push_str(&format!("    *{} = {};\n", out_name, body));
+                    }
+                }
+                out.push_str("}\n");
             }
             Lang::Rust => {
+                out.push_str(&self.helpers());
                 let args = params
                     .iter()
                     .map(|p| format!("{}: f64", p))
                     .collect::<Vec<_>>()
                     .join(", ");
-                out.push_str(&self.helpers());
-                out.push_str(&format!("pub fn {}({}) -> f64 {{\n", name, args));
+                if single {
+                    out.push_str(&format!("pub fn {}({}) -> f64 {{\n", name, args));
+                } else {
+                    let names: Vec<&str> = bodies.iter().map(|(n, _)| n.as_str()).collect();
+                    out.push_str(&format!("/// Returns ({}).\n", names.join(", ")));
+                    let tuple = vec!["f64"; bodies.len()].join(", ");
+                    out.push_str(&format!("pub fn {}({}) -> ({}) {{\n", name, args, tuple));
+                }
                 for (t, v) in &self.lets {
                     out.push_str(&format!("    let {} = {};\n", t, v));
                 }
-                out.push_str(&format!("    {}\n}}\n", body));
+                if single {
+                    out.push_str(&format!("    {}\n", bodies[0].1));
+                } else {
+                    let values: Vec<String> = bodies.iter().map(|(_, b)| b.clone()).collect();
+                    out.push_str(&format!("    ({})\n", values.join(", ")));
+                }
+                out.push_str("}\n");
             }
             Lang::Python => {
                 out.push_str("import math\n\n\n");
                 out.push_str(&self.helpers());
                 out.push_str(&format!("def {}({}):\n", name, params.join(", ")));
+                if !single {
+                    let names: Vec<&str> = bodies.iter().map(|(n, _)| n.as_str()).collect();
+                    out.push_str(&format!(
+                        "    \"\"\"Returns ({}).\"\"\"\n",
+                        names.join(", ")
+                    ));
+                }
                 for (t, v) in &self.lets {
                     out.push_str(&format!("    {} = {}\n", t, v));
                 }
-                out.push_str(&format!("    return {}\n", body));
+                if single {
+                    out.push_str(&format!("    return {}\n", bodies[0].1));
+                } else {
+                    let values: Vec<String> = bodies.iter().map(|(_, b)| b.clone()).collect();
+                    out.push_str(&format!("    return ({})\n", values.join(", ")));
+                }
             }
         }
         out
@@ -276,8 +344,8 @@ impl<'a> Emitter<'a> {
     /// `**` nor `math.pow` is IEEE `pow`.
     fn helpers(&self) -> String {
         let ops: Vec<Op> = self
-            .expr
-            .reachable(self.expr.root())
+            .bundle
+            .reachable()
             .iter()
             .map(|&id| self.expr.node(id).op)
             .collect();

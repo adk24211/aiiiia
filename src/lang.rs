@@ -585,6 +585,12 @@ impl RecExpr {
         self.reachable(self.root()).len()
     }
 
+    /// Every node, in dependency order. Equal to `reachable(root())` when the
+    /// expression has a single root and nothing dead.
+    pub fn all_ids(&self) -> Vec<Id> {
+        (0..self.nodes.len()).map(Id::new).collect()
+    }
+
     /// Number of nodes in the fully expanded tree. This is the number the
     /// naive printer emits, and it can be exponentially larger than
     /// [`RecExpr::dag_size`].
@@ -639,6 +645,39 @@ impl RecExpr {
         v.sort_by_key(|s| s.as_str());
         v.dedup();
         v
+    }
+
+    /// Rebuild the expression keeping only what `roots` reach, returning the
+    /// new expression and where each root ended up.
+    ///
+    /// Sharing is preserved across the roots: a subterm two of them use is one
+    /// node in the result, which is the whole point of extracting several
+    /// expressions from one e-graph.
+    pub fn compact_many(&self, roots: &[Id]) -> (RecExpr, Vec<Id>) {
+        let mut out = RecExpr::new();
+        let mut map: HashMap<Id, Id> = HashMap::new();
+        let mut seen = vec![false; self.nodes.len()];
+        let mut stack: Vec<Id> = roots.to_vec();
+        while let Some(x) = stack.pop() {
+            if seen[x.index()] {
+                continue;
+            }
+            seen[x.index()] = true;
+            stack.extend_from_slice(self.nodes[x.index()].children());
+        }
+        // Ascending order is dependency order: a node's children precede it.
+        for (i, (n, _)) in self.nodes.iter().zip(&seen).enumerate() {
+            if !seen[i] {
+                continue;
+            }
+            let new = out.add(ENode::new(
+                n.op,
+                n.children().iter().map(|c| map[c]).collect::<Vec<_>>(),
+            ));
+            map.insert(Id::new(i), new);
+        }
+        let mapped = roots.iter().map(|r| map[r]).collect();
+        (out, mapped)
     }
 
     /// Rebuild the expression keeping only what `root` reaches, with `root`

@@ -1,8 +1,9 @@
 //! The `saturn` command line.
 
 use saturn::analysis::MathAnalysis;
+use saturn::bundle::Bundle;
 use saturn::check::Checker;
-use saturn::codegen::{emit, Lang};
+use saturn::codegen::Lang;
 use saturn::egraph::EGraph;
 use saturn::eval::{eval, parse_bindings, Env};
 use saturn::extract::{dag_cost, tree_cost, AstDepth, AstSize, DagExtractor, OpCost};
@@ -120,6 +121,7 @@ impl Args {
             "lang",
             "name",
             "assume",
+            "file",
         ];
         const BOOL_FLAGS: &[&str] = &[
             "help", "version", "stats", "shared", "sexp", "dot", "raw", "wild", "tame", "opt",
@@ -399,7 +401,78 @@ fn show_expr(st: &Style, label: &str, e: &RecExpr, shared: bool) {
     }
 }
 
+/// The expressions to work on: one from the command line, or a file of them.
+fn input_bundle(args: &Args) -> Result<Bundle, String> {
+    match args.get("file") {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read `{}`: {}", path, e))?;
+            let bundle = Bundle::parse(&text).map_err(|e| e.render())?;
+            if bundle.is_empty() {
+                return Err(format!("`{}` contains no expressions", path));
+            }
+            Ok(bundle)
+        }
+        None => Ok(Bundle::single(
+            parse(&args.expr_arg()?).map_err(|e| e.render())?,
+        )),
+    }
+}
+
+fn cmd_opt_bundle(args: &Args, st: &Style, bundle: Bundle) -> Result<(), String> {
+    let opts = Options::from(args)?;
+    let shared = args.has("shared");
+    let (best, runner) = saturn::optimize_bundle(opts.runner(), &bundle, &opts.rules, OpCost);
+
+    for ((name, _), (_, expr)) in bundle.outputs.iter().zip(bundle.parts()) {
+        show_expr(st, name, &expr, shared);
+    }
+    println!();
+    for ((name, _), (_, expr)) in best.outputs.iter().zip(best.parts()) {
+        show_expr(st, name, &expr, shared);
+    }
+    println!();
+    let before = bundle.cost(&OpCost);
+    let after = best.cost(&OpCost);
+    println!(
+        "  {} {} -> {} nodes, {} -> {} ops  {}",
+        st.dim("together "),
+        bundle.dag_size(),
+        best.dag_size(),
+        before,
+        after,
+        if after < before {
+            st.green(&pct(before, after))
+        } else {
+            st.dim(&pct(before, after))
+        }
+    );
+    println!(
+        "  {} {} ops if each were built on its own",
+        st.dim("apart    "),
+        best.cost_apart(&OpCost)
+    );
+    println!(
+        "  {} {} classes, {} nodes, {} iterations, {:.1?} ({})",
+        st.dim("e-graph  "),
+        runner.egraph.number_of_classes(),
+        runner.egraph.total_nodes(),
+        runner.iterations.len(),
+        runner.elapsed(),
+        runner
+            .stop_reason
+            .as_ref()
+            .map(|r| r.to_string())
+            .unwrap_or_default(),
+    );
+    Ok(())
+}
+
 fn cmd_opt(args: &Args, st: &Style) -> Result<(), String> {
+    if args.get("file").is_some() {
+        let bundle = input_bundle(args)?;
+        return cmd_opt_bundle(args, st, bundle);
+    }
     let src = args.expr_arg()?;
     let expr = parse(&src).map_err(|e| e.render())?;
     let opts = Options::from(args)?;
@@ -949,8 +1022,6 @@ fn cmd_why(args: &Args, st: &Style) -> Result<bool, String> {
 }
 
 fn cmd_emit(args: &Args, _st: &Style) -> Result<(), String> {
-    let src = args.expr_arg()?;
-    let expr = parse(&src).map_err(|e| e.render())?;
     let lang_name = args.get("lang").unwrap_or("c");
     let lang = Lang::parse(lang_name).ok_or_else(|| {
         format!(
@@ -959,12 +1030,14 @@ fn cmd_emit(args: &Args, _st: &Style) -> Result<(), String> {
         )
     })?;
     let name = args.get("name").unwrap_or("f");
-    let expr = if args.has("raw") {
-        expr
+    let bundle = input_bundle(args)?;
+    let bundle = if args.has("raw") {
+        bundle
     } else {
-        Options::from(args)?.optimize(&expr).0
+        let opts = Options::from(args)?;
+        saturn::optimize_bundle(opts.runner(), &bundle, &opts.rules, OpCost).0
     };
-    print!("{}", emit(&expr, lang, name));
+    print!("{}", saturn::codegen::emit_bundle(&bundle, lang, name));
     Ok(())
 }
 
@@ -1278,6 +1351,8 @@ OPTIONS
   --wild                let `check` use infinities and huge magnitudes
   --lang <l>            c | rust | python, for `emit`      [default: c]
   --name <id>           name of the emitted function        [default: f]
+  --file <path>         read several named expressions, one per line, and
+                        optimize them together so they share subterms
   --raw                 in `vm` and `emit`, skip optimizing first
   --count <n>           expressions to generate in `fuzz`  [default: 1000]
   --depth <n>           generated expression depth          [default: 5]
@@ -1295,6 +1370,7 @@ EXAMPLES
   saturn vm 'u / w + v / w'
   saturn fuzz --rules safe --count 5000
   saturn emit 'a*x^3 + b*x^2 + c*x + d' --rules all --lang rust --name poly
+  saturn emit --file rotate.txt --lang c --name rotate
   saturn why 'x*y + x*z' 'x*(y + z)' --rules all
   saturn opt 'w / w * x' --assume 'finite(w) && nonzero(w)'
 ";

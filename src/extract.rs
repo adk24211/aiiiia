@@ -163,38 +163,38 @@ fn solve<A: Analysis, C: CostFunction>(
 /// operator costs something and a cycle would need a node that costs nothing.
 /// A *discounted* selection has no such guarantee, so this reports the problem
 /// instead of looping.
-fn build_from<A: Analysis>(egraph: &EGraph<A>, selection: &Selection, root: Id) -> Option<RecExpr> {
-    fn go<A: Analysis>(
-        egraph: &EGraph<A>,
-        selection: &Selection,
-        class: Id,
-        expr: &mut RecExpr,
-        memo: &mut HashMap<Id, Id>,
-        on_stack: &mut Vec<Id>,
-    ) -> Option<Id> {
-        let class = egraph.find(class);
-        if let Some(&id) = memo.get(&class) {
-            return Some(id);
-        }
-        if on_stack.contains(&class) {
-            return None;
-        }
-        on_stack.push(class);
-        let node = &selection.get(&class)?.1;
-        let mut children = Vec::with_capacity(node.children().len());
-        for &c in node.children() {
-            children.push(go(egraph, selection, c, expr, memo, on_stack)?);
-        }
-        on_stack.pop();
-        let id = expr.op(node.op, children);
-        memo.insert(class, id);
-        Some(id)
+fn build_into<A: Analysis>(
+    egraph: &EGraph<A>,
+    selection: &Selection,
+    class: Id,
+    expr: &mut RecExpr,
+    memo: &mut HashMap<Id, Id>,
+    on_stack: &mut Vec<Id>,
+) -> Option<Id> {
+    let class = egraph.find(class);
+    if let Some(&id) = memo.get(&class) {
+        return Some(id);
     }
+    if on_stack.contains(&class) {
+        return None;
+    }
+    on_stack.push(class);
+    let node = &selection.get(&class)?.1;
+    let mut children = Vec::with_capacity(node.children().len());
+    for &c in node.children() {
+        children.push(build_into(egraph, selection, c, expr, memo, on_stack)?);
+    }
+    on_stack.pop();
+    let id = expr.op(node.op, children);
+    memo.insert(class, id);
+    Some(id)
+}
 
+fn build_from<A: Analysis>(egraph: &EGraph<A>, selection: &Selection, root: Id) -> Option<RecExpr> {
     let root = egraph.find(root);
     let mut expr = RecExpr::new();
     let mut memo = HashMap::new();
-    let id = go(
+    let id = build_into(
         egraph,
         selection,
         root,
@@ -203,6 +203,29 @@ fn build_from<A: Analysis>(egraph: &EGraph<A>, selection: &Selection, root: Id) 
         &mut Vec::new(),
     )?;
     Some(expr.compact(id))
+}
+
+/// Build several roots into one expression, sharing everything they share.
+fn build_many<A: Analysis>(
+    egraph: &EGraph<A>,
+    selection: &Selection,
+    roots: &[Id],
+) -> Option<(RecExpr, Vec<Id>)> {
+    let mut expr = RecExpr::new();
+    let mut memo: HashMap<Id, Id> = HashMap::new();
+    let mut ids = Vec::with_capacity(roots.len());
+    for &root in roots {
+        ids.push(build_into(
+            egraph,
+            selection,
+            root,
+            &mut expr,
+            &mut memo,
+            &mut Vec::new(),
+        )?);
+    }
+    let (compacted, mapped) = expr.compact_many(&ids);
+    Some((compacted, mapped))
 }
 
 /// The e-classes a selection actually materializes, reachable from `root`.
@@ -274,6 +297,14 @@ impl<'a, A: Analysis, C: CostFunction> Extractor<'a, A, C> {
         let expr = build_from(self.egraph, &self.best, root)?;
         Some((cost, expr))
     }
+
+    /// Extract several classes into one shared expression.
+    ///
+    /// A subterm two of them use becomes one node, which is the reason to put
+    /// several expressions in the same e-graph in the first place.
+    pub fn find_best_many(&self, classes: &[Id]) -> Option<(RecExpr, Vec<Id>)> {
+        build_many(self.egraph, &self.best, classes)
+    }
 }
 
 /// Extraction that accounts for sharing.
@@ -319,6 +350,39 @@ impl<'a, A: Analysis, C: CostFunction> DagExtractor<'a, A, C> {
         })
     }
 
+    /// Extract several classes into one shared expression, refining against
+    /// everything all of them materialize.
+    pub fn find_best_many(&self, roots: &[Id]) -> Option<(f64, RecExpr, Vec<Id>)> {
+        let roots: Vec<Id> = roots.iter().map(|&r| self.egraph.find(r)).collect();
+        let mut selection = solve(self.egraph, &self.cost_fn, &HashSet::new());
+        let (mut best, mut mapped) = build_many(self.egraph, &selection, &roots)?;
+        let mut best_cost = dag_cost_of(&best, &best.all_ids(), &self.cost_fn);
+
+        for _ in 0..self.rounds {
+            let mut free: HashSet<Id> = HashSet::new();
+            for &root in &roots {
+                free.extend(materialized(self.egraph, &selection, root));
+            }
+            for root in &roots {
+                free.remove(root);
+            }
+            let candidate = solve(self.egraph, &self.cost_fn, &free);
+            let Some((expr, ids)) = build_many(self.egraph, &candidate, &roots) else {
+                break;
+            };
+            let cost = dag_cost_of(&expr, &expr.all_ids(), &self.cost_fn);
+            if cost < best_cost {
+                best = expr;
+                mapped = ids;
+                best_cost = cost;
+                selection = candidate;
+            } else {
+                break;
+            }
+        }
+        Some((best_cost, best, mapped))
+    }
+
     pub fn try_find_best(&self, class: Id) -> Option<(f64, RecExpr)> {
         let root = self.egraph.find(class);
         let mut selection = solve(self.egraph, &self.cost_fn, &HashSet::new());
@@ -348,10 +412,14 @@ impl<'a, A: Analysis, C: CostFunction> DagExtractor<'a, A, C> {
 
 /// Cost of an expression counting shared subterms once each.
 pub fn dag_cost<C: CostFunction>(expr: &RecExpr, cost_fn: &C) -> f64 {
+    dag_cost_of(expr, &expr.reachable(expr.root()), cost_fn)
+}
+
+/// Cost of exactly these nodes, counted once each.
+pub fn dag_cost_of<C: CostFunction>(expr: &RecExpr, ids: &[Id], cost_fn: &C) -> f64 {
     let zero = |_: Id| 0.0;
-    expr.reachable(expr.root())
-        .into_iter()
-        .map(|id| cost_fn.cost(expr.node(id), &zero))
+    ids.iter()
+        .map(|&id| cost_fn.cost(expr.node(id), &zero))
         .sum()
 }
 

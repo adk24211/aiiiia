@@ -327,3 +327,41 @@ fn a_malformed_assumption_is_rejected() {
     assert!(err.contains('^'), "{}", err);
     assert!(fails(&["opt", "x", "--assume", "x != 5"]).contains("against 0"));
 }
+
+#[test]
+fn a_file_of_expressions_is_optimized_together() {
+    let dir = std::env::temp_dir().join("saturn-cli-test");
+    std::fs::create_dir_all(&dir).expect("a writable temp directory");
+    let path = dir.join("rotate.txt");
+    std::fs::write(
+        &path,
+        "# a rotation\nnx = x * cos(t) - y * sin(t)\nny = x * sin(t) + y * cos(t)\n",
+    )
+    .expect("writing the input");
+    let file = path.to_str().expect("utf-8 path");
+
+    let out = stdout(&["opt", "--file", file]);
+    assert!(out.contains("nx"), "{}", out);
+    assert!(out.contains("ny"), "{}", out);
+    assert!(out.contains("together"), "{}", out);
+    assert!(out.contains("apart"), "{}", out);
+
+    let c = stdout(&["emit", "--file", file, "--name", "rotate"]);
+    assert!(c.contains("void rotate("), "{}", c);
+    assert!(c.contains("double *nx"), "{}", c);
+    assert_eq!(c.matches("cos(").count(), 1, "cos should be shared:\n{}", c);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_missing_or_empty_file_is_reported() {
+    assert!(fails(&["opt", "--file", "/nonexistent/nope.txt"]).contains("cannot read"));
+    let dir = std::env::temp_dir().join("saturn-cli-empty");
+    std::fs::create_dir_all(&dir).expect("a writable temp directory");
+    let path = dir.join("empty.txt");
+    std::fs::write(&path, "# only a comment\n").expect("writing the input");
+    let err = fails(&["opt", "--file", path.to_str().expect("utf-8 path")]);
+    assert!(err.contains("no expressions"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
