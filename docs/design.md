@@ -75,6 +75,24 @@ rebuild costs far less than the e-matching that follows it.
 `EGraph::check_invariants` verifies all of this and is called by the test suite
 and by `saturn egraph`.
 
+### Rebuilding terminates; the analysis might not
+
+Congruence closure always finishes: every union reduces the number of
+e-classes, and there are finitely many. An e-class analysis has no such
+guarantee. Intervals have infinite descending chains — `[0, 1]`, `[0, ½]`,
+`[0, ¼]` — and an e-graph's parent relation can be cyclic, so a class can feed
+its own refinement forever.
+
+Worse, the step function has to be *monotone* for a fixpoint to exist at all.
+`Interval::meet` originally widened when two facts contradicted each other,
+which let the analysis move back *up* the lattice by an arbitrary amount; a run
+that should have taken milliseconds never returned. It now jumps to TOP, the
+one value with nothing above it to jump to next. `rebuild` additionally caps
+how many times it will re-run the analysis, which is a widening by fiat:
+giving up on precision is sound, because every fact still in place was computed
+from the facts below it. Giving up on *congruence* is not, so the worklist is
+always drained before returning.
+
 ### Commutativity is structural
 
 `a + b` and `b + a` denote the same value, and the usual way to say so is a
@@ -84,9 +102,18 @@ doubles the graph.
 `saturn` instead stores commutative e-nodes with their children in a canonical
 order, so `a + b` and `b + a` hashcons to the *same node*. The matcher pays for
 this by trying both orders when it descends through a commutative operator —
-a bounded, local cost — and commutativity is otherwise free. `Op::is_commutative`
-lists which operators qualify; each one had to be checked against IEEE-754,
-including what `min`, `max`, `==` and `&&` do with NaN.
+a bounded, local cost — and commutativity is otherwise free.
+
+`Op::is_commutative` lists which operators qualify, and every one of them had
+to be checked against IEEE-754 rather than against intuition. `min` and `max`
+failed. `f64::min` and C's `fmin` return "either input" when the two compare
+equal, so on `+0.0` and `-0.0` the answer depends on operand order, on which
+instruction the compiler chose, and on whether the operands happened to be
+constants — which meant constant folding could disagree with the interpreter
+about the same expression. `lang::min` and `lang::max` settle the tie
+explicitly, and the code emitter carries a helper rather than trusting the
+target's version. The bug surfaced only when the emitted C was compiled and
+run against the interpreter; it survived every amount of reading.
 
 ## E-class analyses
 
@@ -193,6 +220,24 @@ and it is NP-hard. `DagExtractor` takes a greedy pass at it and says so in its
 documentation. Where the two disagree, `saturn` reports DAG cost in the CLI,
 because that is the number that corresponds to work the machine does.
 
+## Limits that actually limit
+
+A rule set that grows the graph without bound is normal, so the runner takes an
+iteration, node, and time budget. Getting those to hold took three tries.
+
+Checking between iterations is not enough: a single rule's e-matching can run
+for minutes on a graph that just grew by two orders of magnitude. Checking
+between rules is not enough either, because the matcher itself is unbounded —
+and capping the *results* it returns does not help, since a pattern can descend
+through thousands of e-nodes and fail at the last level every time, producing
+nothing while spending everything. Only a counter on steps taken bounds that.
+
+So there are three: the clock is read between rules and every 256 substitutions
+during application, the matcher has a step budget, and a search that hits its
+cap is reported in the iteration's `truncated` list rather than swallowed. A
+truncated search is a reason the run is not a proof of saturation, and the
+report says so.
+
 ## From e-graph to machine
 
 `RecExpr` (`src/lang.rs`) is a flat, topologically sorted DAG built through a
@@ -206,6 +251,24 @@ dependency chain needs a handful of slots rather than one per node. The VM
 performs the same operations in the same order as the reference interpreter in
 `src/eval.rs`, and the test suite asserts they agree *bit for bit* — an
 approximate check would hide exactly the kind of bug worth finding.
+
+## Emitting code
+
+`src/codegen.rs` turns the extracted DAG into a C, Rust, or Python function,
+binding a temporary for every subterm used more than once.
+
+The interesting part is how much of the target language cannot be used
+directly. `min` and `max` leave the `±0` tie unspecified. `sign` does not
+exist, and the obvious ternary gets NaN wrong. An unsuffixed Rust float literal
+is an ambiguous numeric type, so `0.5.sqrt()` does not compile. Python's `/`,
+`**`, `math.pow`, `sqrt`, `log`, `exp`, `sin`, `cos` and `tan` all *raise*
+where IEEE-754 returns a NaN or an infinity, and `floor` and `ceil` return
+integers. Each gets a small helper, emitted only when the expression needs it.
+
+None of that list came from reading standards. The test suite compiles the
+emitted C and Rust, runs the emitted Python, and compares 120 random
+expressions over 24 hostile input rows against the reference interpreter bit
+for bit. Every item was a failure first.
 
 ## Differentiation as rewriting
 
