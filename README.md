@@ -53,14 +53,14 @@ $ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --stats
   optimized x * (c + x * (b + x * a)) + d
             11 nodes, 15.625 ops  91% cheaper
 
-  e-graph   32 classes, 61 nodes, 6 iterations, 1.2ms (saturated)
+  e-graph   32 classes, 61 nodes, 6 iterations, 1.4ms (saturated)
   rules     201 rules from `all`
 
   stopped: saturated
   iterations: 6
   classes: 32
   nodes: 61
-  total time: 1.21ms
+  total time: 1.37ms
   rules that fired:
         20  assoc-add
          8  factor
@@ -69,12 +69,12 @@ $ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --stats
          1  mul-pow
 
   iteration    classes    nodes   matches   time
-          0         19       25         7   113.6µs
-          1         29       47        33   130.4µs
-          2         31       56        89   215.2µs
-          3         34       63       123   248.5µs
-          4         32       61       141   244.5µs
-          5         32       61       141   256.2µs
+          0         19       25         7   110.8µs
+          1         29       47        33   131.4µs
+          2         31       56        89   237.6µs
+          3         34       63       123   414.9µs
+          4         32       61       141   246.9µs
+          5         32       61       141   230.5µs
 ```
 
 Every rule that fired is a one-line local identity. Horner's form is what falls
@@ -93,7 +93,7 @@ $ saturn opt 'u / w + v / w' --rules all
   optimized (u + v) / w
             5 nodes, 16.375 ops  48% cheaper
 
-  e-graph   7 classes, 8 nodes, 2 iterations, 133.9µs (saturated)
+  e-graph   7 classes, 8 nodes, 2 iterations, 130.9µs (saturated)
   rules     201 rules from `all`
 ```
 
@@ -143,11 +143,30 @@ $ saturn vm 'a*x^3 + b*x^2 + c*x + d' --rules all
   result in s0
 ```
 
+<!-- DEMO:time -->
+
+```console
+$ saturn time 'a*x^3 + b*x^2 + c*x + d' --rules all
+  input     a * x ^ 3 + b * x ^ 2 + x * c + d
+  optimized x * (c + x * (b + x * a)) + d
+
+                          ns/eval   speedup
+  interpreted                949.5   1.0x
+  compiled                    73.9   12.8x
+  compiled + optimized        27.3   34.7x
+
+  program 15 -> 11 instructions, 5 -> 5 slots, 201 rules from `all`
+```
+
 That is the Horner form from above, compiled. The extracted expression is
 already a maximally shared DAG, so common-subexpression elimination is not a
 pass — it is a consequence of how the expression is represented. Slots are
 recycled once a value is dead, so eleven instructions need five slots rather
 than eleven.
+
+The cost model said 91% cheaper; the machine says 2.7x, on top of the 13x that
+compiling buys on its own. A cost model is a guess about hardware — `saturn
+time` is the hardware answering.
 
 ### It checks itself
 
@@ -237,6 +256,7 @@ binders out of the e-graph entirely.
 | `saturn check <expr>` | compare the optimized form against the original numerically |
 | `saturn fuzz` | generate random expressions and test the rules for soundness |
 | `saturn vm <expr>` | compile to bytecode and disassemble |
+| `saturn time <expr>` | measure interpreted, compiled, and optimized evaluation |
 | `saturn ast <expr>` | show the parsed expression DAG |
 | `saturn egraph <expr>` | dump the saturated e-graph, or `--dot` for Graphviz |
 | `saturn rules [set]` | list the rule sets, or the rules in one |
@@ -272,20 +292,20 @@ $ saturn bench
   using 201 rules from `all`
 
   name           nodes -> nodes     ops -> ops      classes    time
-  identity         7 -> 1           10 -> 0            839   318.5ms
-  factor           9 -> 7           14 -> 6             15   469.0µs
-  cancel           5 -> 3           20 -> 1            809    66.1ms
-  powers           5 -> 5          160 -> 16          1177   168.1ms
-  exp-fuse         8 -> 6          143 -> 47            14   370.0µs
-  log-ratio        5 -> 4           91 -> 60             8   210.4µs
-  trig             6 -> 1          129 -> 0              7   142.6µs
+  identity         7 -> 1           10 -> 0            839   320.0ms
+  factor           9 -> 7           14 -> 6             15   406.8µs
+  cancel           5 -> 3           20 -> 1            809    65.0ms
+  powers           5 -> 5          160 -> 16          1177   166.7ms
+  exp-fuse         8 -> 6          143 -> 47            14   406.8µs
+  log-ratio        5 -> 4           91 -> 60             8   183.4µs
+  trig             6 -> 1          129 -> 0              7   134.4µs
   horner          15 -> 11         176 -> 16            32     1.2ms
-  divide           6 -> 5           31 -> 16             7   128.0µs
-  deriv            9 -> 8            - -> 8           1302   699.4ms
-  deriv-chain      5 -> 8            - -> 178          853   339.7ms
-  sqrt-square      7 -> 6           49 -> 26             8   175.7µs
-  boolean          8 -> 6            6 -> 4              8   149.9µs
-  big              7 -> 7           10 -> 10           557    54.4ms
+  divide           6 -> 5           31 -> 16             7   149.2µs
+  deriv            9 -> 8            - -> 8           1302   697.5ms
+  deriv-chain      5 -> 8            - -> 178          853   333.7ms
+  sqrt-square      7 -> 6           49 -> 26             8   279.1µs
+  boolean          8 -> 6            6 -> 4              8   197.4µs
+  big              7 -> 7           10 -> 10           557    54.0ms
 
   overall 76% cheaper (derivatives excluded: they have no runtime cost to compare against)
 ```

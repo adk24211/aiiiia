@@ -28,6 +28,7 @@ DEMOS = {
     "divide": ["opt", "u / w + v / w", "--rules", "all"],
     "diff": ["diff", "x", "exp(sin(x * x))"],
     "vm": ["vm", "a*x^3 + b*x^2 + c*x + d", "--rules", "all"],
+    "time": ["time", "a*x^3 + b*x^2 + c*x + d", "--rules", "all"],
     "fuzz": ["fuzz", "--rules", "safe", "--count", "400", "--samples", "200"],
     "rules": ["rules"],
     "bench": ["bench"],

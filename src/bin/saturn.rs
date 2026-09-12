@@ -9,6 +9,7 @@ use saturn::gen::{ExprStream, Grammar};
 use saturn::lang::{Op, RecExpr};
 use saturn::parser::parse;
 use saturn::rewrite::Rewrite;
+use saturn::rng::Rng;
 use saturn::rules;
 use saturn::runner::{BackoffScheduler, Runner, StopReason};
 use saturn::sym::Sym;
@@ -734,6 +735,143 @@ fn cmd_bench(args: &Args, st: &Style) -> Result<(), String> {
     Ok(())
 }
 
+/// Measure how long one evaluation takes, averaged over many.
+///
+/// A cost model is a guess about the machine. This is the machine answering.
+fn measure(run: &mut dyn FnMut(usize) -> f64, calls: usize) -> f64 {
+    // Warm up, then take the best of several rounds: the minimum is the
+    // measurement least polluted by whatever else the machine was doing.
+    std::hint::black_box(run(calls / 4));
+    let mut best = f64::INFINITY;
+    for _ in 0..5 {
+        let t = std::time::Instant::now();
+        std::hint::black_box(run(calls));
+        let ns = t.elapsed().as_secs_f64() * 1e9 / calls as f64;
+        best = best.min(ns);
+    }
+    best
+}
+
+fn cmd_time(args: &Args, st: &Style) -> Result<(), String> {
+    let src = args.expr_arg()?;
+    let expr = parse(&src).map_err(|e| e.render())?;
+    let opts = Options::from(args)?;
+    let calls: usize = args.num("calls")?.unwrap_or(200_000);
+
+    let (best, _, runner) = opts.optimize(&expr);
+    let raw = Program::compile(&expr).map_err(|e| e.to_string())?;
+    let fast = Program::compile(&best).map_err(|e| e.to_string())?;
+
+    // One set of inputs, drawn once, so every variant sees identical work.
+    let mut rng = Rng::seed(args.num("seed")?.unwrap_or(0x5A7));
+    let rows: Vec<Vec<f64>> = (0..1024)
+        .map(|_| raw.params().iter().map(|_| rng.tame_float()).collect())
+        .collect();
+    let reordered: Vec<Vec<f64>> = rows
+        .iter()
+        .map(|r| {
+            let env: Env = raw
+                .params()
+                .iter()
+                .copied()
+                .zip(r.iter().copied())
+                .collect();
+            fast.params()
+                .iter()
+                .map(|p| env.get(p).copied().unwrap_or(0.0))
+                .collect()
+        })
+        .collect();
+
+    let interpreted = {
+        let envs: Vec<Env> = rows
+            .iter()
+            .map(|r| {
+                raw.params()
+                    .iter()
+                    .copied()
+                    .zip(r.iter().copied())
+                    .collect()
+            })
+            .collect();
+        measure(
+            &mut |n| {
+                let mut acc = 0.0;
+                for i in 0..n {
+                    acc += eval(&expr, &envs[i % envs.len()]).unwrap_or(0.0);
+                }
+                acc
+            },
+            calls / 20,
+        )
+    };
+    let compiled = measure(
+        &mut |n| {
+            let mut slots = Vec::new();
+            let mut acc = 0.0;
+            for i in 0..n {
+                acc += raw.eval_with(&rows[i % rows.len()], &mut slots);
+            }
+            acc
+        },
+        calls,
+    );
+    let optimized = measure(
+        &mut |n| {
+            let mut slots = Vec::new();
+            let mut acc = 0.0;
+            for i in 0..n {
+                acc += fast.eval_with(&reordered[i % reordered.len()], &mut slots);
+            }
+            acc
+        },
+        calls,
+    );
+
+    show_expr(st, "input", &expr, false);
+    show_expr(st, "optimized", &best, false);
+    println!();
+    println!("  {}", st.dim("                        ns/eval   speedup"));
+    let row = |label: &str, ns: f64, base: f64, colour: bool| {
+        let speedup = if base > 0.0 && ns > 0.0 {
+            format!("{:.1}x", base / ns)
+        } else {
+            "-".to_string()
+        };
+        println!(
+            "  {:<24} {:>7.1}   {}",
+            label,
+            ns,
+            if colour {
+                st.green(&speedup)
+            } else {
+                st.dim(&speedup)
+            }
+        );
+    };
+    row("interpreted", interpreted, interpreted, false);
+    row("compiled", compiled, interpreted, compiled < interpreted);
+    row(
+        "compiled + optimized",
+        optimized,
+        interpreted,
+        optimized < compiled,
+    );
+    println!();
+    println!(
+        "  {} {} -> {} instructions, {} -> {} slots, {} rules from `{}`",
+        st.dim("program"),
+        raw.len(),
+        fast.len(),
+        raw.slots,
+        fast.slots,
+        opts.rules.len(),
+        opts.rules_name,
+    );
+    let _ = runner;
+    Ok(())
+}
+
 fn cmd_fuzz(args: &Args, st: &Style) -> Result<bool, String> {
     let opts = Options::from(args)?;
     let count: usize = args.num("count")?.unwrap_or(1_000);
@@ -899,6 +1037,7 @@ COMMANDS
   ast <expr>            show the parsed expression DAG
   egraph <expr>         dump the saturated e-graph (--dot for Graphviz)
   rules [set]           list the rule sets, or the rules in one
+  time <expr>           measure interpreted, compiled, and optimized evaluation
   bench                 run the built-in suite and report the savings
   fuzz                  generate random expressions and check the rules are sound
   repl                  interactive
@@ -971,6 +1110,7 @@ fn main() -> ExitCode {
         "rules" => cmd_rules(&args, &st).map(|_| true),
         "bench" => cmd_bench(&args, &st).map(|_| true),
         "fuzz" => cmd_fuzz(&args, &st),
+        "time" => cmd_time(&args, &st).map(|_| true),
         "repl" => cmd_repl(&st).map(|_| true),
         other => Err(format!("unknown command `{}`; run `saturn --help`", other)),
     };
