@@ -57,6 +57,16 @@ impl Default for Checker {
     }
 }
 
+/// Do `x` and `y` count as the same answer?
+pub fn agree(_x: f64, _y: f64, _tolerance: f64) -> bool {
+    unimplemented!()
+}
+
+/// The relative difference between `x` and `y`.
+pub fn relative_error(_x: f64, _y: f64) -> f64 {
+    unimplemented!()
+}
+
 impl Checker {
     pub fn new() -> Checker {
         Checker::default()

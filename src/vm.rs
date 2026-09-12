@@ -39,6 +39,9 @@ impl Program {
     pub fn disassemble(&self) -> String {
         unimplemented!()
     }
+    pub fn params(&self) -> &[Sym] {
+        &self.params
+    }
     pub fn len(&self) -> usize {
         self.code.len()
     }

@@ -184,7 +184,7 @@ fn differentiation_matches_a_numeric_derivative() {
         let derivative = optimize(&wrapped, &rules::default_rules());
         let original = saturn::parser::parse(case).unwrap();
 
-        for &at in &[0.37, 1.4, 2.9, 5.5] {
+        for at in [0.37f64, 1.4, 2.9, 5.5] {
             let h = 1e-5 * at.abs().max(1.0);
             let env_at = |v: f64| -> Env { [(x, v)].into_iter().collect() };
             let Ok(plus) = eval(&original, &env_at(at + h)) else {
