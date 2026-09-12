@@ -51,6 +51,10 @@ pub struct Iteration {
     /// Rule name -> number of unions it caused.
     pub applied: BTreeMap<String, usize>,
     pub total_matches: usize,
+    /// Rules whose search hit the substitution cap, so the pass did not see
+    /// every match. Reported rather than swallowed: a truncated search is a
+    /// reason the run is not a proof of saturation.
+    pub truncated: Vec<String>,
     pub rebuild_unions: usize,
     pub banned: Vec<String>,
     pub search_time: Duration,
@@ -249,9 +253,13 @@ impl<A: Analysis> Runner<A> {
             roots: Vec::new(),
             iterations: Vec::new(),
             stop_reason: None,
-            iter_limit: 30,
-            node_limit: 100_000,
-            time_limit: Duration::from_secs(10),
+            // Generous enough for anything hand-written, small enough that a
+            // command-line invocation answers while you are still looking at
+            // it. Equality saturation will happily spend any budget it is
+            // given.
+            iter_limit: 20,
+            node_limit: 20_000,
+            time_limit: Duration::from_secs(3),
             // Backoff by default: a handful of rules that match explosively
             // (association, distribution) will otherwise consume the whole
             // node budget before the rules that actually shrink the expression
@@ -290,6 +298,19 @@ impl<A: Analysis> Runner<A> {
             .find(*self.roots.first().expect("no root expression was added"))
     }
 
+    /// Whether the time or node budget is spent, checked mid-iteration.
+    fn out_of_budget(&self) -> Option<StopReason> {
+        if let Some(start) = self.start {
+            if start.elapsed() > self.time_limit {
+                return Some(StopReason::TimeLimit);
+            }
+        }
+        if self.egraph.total_nodes() > self.node_limit {
+            return Some(StopReason::NodeLimit(self.node_limit));
+        }
+        None
+    }
+
     fn check_limits(&self, iteration: usize) -> Option<StopReason> {
         if iteration >= self.iter_limit {
             return Some(StopReason::IterationLimit(self.iter_limit));
@@ -306,7 +327,12 @@ impl<A: Analysis> Runner<A> {
     }
 
     /// Run `rules` until saturation or a limit.
+    ///
+    /// Setting `SATURN_TRACE` in the environment streams each phase to stderr
+    /// as it happens, which is the only way to see where a run that never
+    /// returns is actually spending its time.
     pub fn run(mut self, rules: &[Rewrite<A>]) -> Self {
+        let trace = std::env::var_os("SATURN_TRACE").is_some();
         self.start = Some(Instant::now());
         self.egraph.rebuild();
 
@@ -324,45 +350,116 @@ impl<A: Analysis> Runner<A> {
             };
 
             // --- search: the e-graph does not change during this phase ---
+            //
+            // Limits are re-checked between rules, not just between
+            // iterations. A single pass over a graph that just grew by two
+            // orders of magnitude can take far longer than the whole budget,
+            // and a `--time 2` that takes a minute is not a limit.
             let t = Instant::now();
             let mut found: Vec<(usize, Vec<SearchMatches>)> = Vec::with_capacity(rules.len());
+            let mut exhausted = None;
             for (ri, rule) in rules.iter().enumerate() {
+                if let Some(reason) = self.out_of_budget() {
+                    exhausted = Some(reason);
+                    break;
+                }
                 let ms = self.scheduler.search(i, &self.egraph, rule);
-                iter.total_matches += ms.iter().map(|m| m.len()).sum::<usize>();
+                let n = ms.iter().map(|m| m.len()).sum::<usize>();
+                iter.total_matches += n;
+                if n >= crate::pattern::MAX_SUBSTS_PER_SEARCH {
+                    iter.truncated.push(rule.name.clone());
+                }
                 if !ms.is_empty() {
                     found.push((ri, ms));
                 }
             }
             iter.search_time = t.elapsed();
             iter.banned = self.scheduler.banned();
+            if trace {
+                eprintln!(
+                    "[saturn] iter {} search {:?} matches {} banned {}",
+                    i,
+                    iter.search_time,
+                    iter.total_matches,
+                    iter.banned.len()
+                );
+            }
 
             // --- apply ---
             let t = Instant::now();
             let mut unions = 0;
             for (ri, ms) in &found {
-                let n = rules[*ri].apply(&mut self.egraph, ms);
+                let rule = &rules[*ri];
+                let mut n = 0;
+                let mut since_check = 0usize;
+                'matches: for m in ms {
+                    for subst in &m.substs {
+                        n += rule.applier.apply(&mut self.egraph, m.eclass, subst).len();
+                        since_check += 1;
+                        // Applying a single rule's matches can itself outlast
+                        // the whole budget on a graph that just exploded, so
+                        // the clock is read here too -- but not on every
+                        // substitution, since reading it is not free.
+                        if since_check >= 256 {
+                            since_check = 0;
+                            if self.out_of_budget().is_some() {
+                                break 'matches;
+                            }
+                        }
+                    }
+                }
                 if n > 0 {
-                    *iter.applied.entry(rules[*ri].name.clone()).or_insert(0) += n;
+                    *iter.applied.entry(rule.name.clone()).or_insert(0) += n;
                 }
                 unions += n;
-                // A rule that explodes mid-apply should not be allowed to blow
-                // past the node limit before the next check.
+                // A rule that explodes mid-apply must not be allowed to blow
+                // far past the node limit before the next check. The slack
+                // factor is there because a partly-applied rule leaves work
+                // for `rebuild` either way.
                 if self.egraph.total_nodes() > self.node_limit.saturating_mul(2) {
+                    exhausted = Some(StopReason::NodeLimit(self.node_limit));
+                    break;
+                }
+                if let Some(reason) = self.out_of_budget() {
+                    exhausted = Some(reason);
                     break;
                 }
             }
             iter.apply_time = t.elapsed();
+            if trace {
+                eprintln!(
+                    "[saturn] iter {} apply {:?} unions {} nodes {}",
+                    i,
+                    iter.apply_time,
+                    unions,
+                    self.egraph.total_nodes()
+                );
+            }
 
             // --- rebuild ---
             let t = Instant::now();
             iter.rebuild_unions = self.egraph.rebuild();
             iter.rebuild_time = t.elapsed();
+            if trace {
+                eprintln!(
+                    "[saturn] iter {} rebuild {:?} unions {} classes {} nodes {}",
+                    i,
+                    iter.rebuild_time,
+                    iter.rebuild_unions,
+                    self.egraph.number_of_classes(),
+                    self.egraph.total_nodes()
+                );
+            }
 
             iter.classes_after = self.egraph.number_of_classes();
             iter.nodes_after = self.egraph.total_nodes();
             let progressed = unions > 0 || iter.grew();
             self.iterations.push(iter);
 
+            if let Some(reason) = exhausted {
+                self.stop_reason = Some(reason);
+                break;
+            }
             if !progressed && self.scheduler.can_stop(i) {
                 self.stop_reason = Some(StopReason::Saturated);
                 break;

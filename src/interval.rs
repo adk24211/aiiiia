@@ -160,14 +160,16 @@ impl Interval {
         let hi = self.hi.min(other.hi);
         let nan = self.nan && other.nan;
         if lo > hi {
-            // The two facts disagree about the reals. This means one of them is
-            // unsound; keep the looser so the analysis stays conservative
-            // rather than silently claiming an impossible range.
-            return Interval {
-                lo: self.lo.min(other.lo),
-                hi: self.hi.max(other.hi),
-                nan,
-            };
+            // The two facts disagree about the reals, which can only happen if
+            // an unsound rule merged two classes that are not equal. Recover
+            // with no information at all rather than an impossible range.
+            //
+            // It has to be TOP specifically, not the union of the two: `meet`
+            // is the step function of a fixpoint, and a step that can move
+            // *up* the lattice by an arbitrary amount need never converge. TOP
+            // is the one value it is safe to jump to, because nothing is above
+            // it to jump to next.
+            return Interval::TOP;
         }
         Interval { lo, hi, nan }
     }

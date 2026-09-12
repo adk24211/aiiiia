@@ -19,6 +19,9 @@ pub enum EvalError {
     /// A `d(x, e)` node survived to runtime. Differentiation is a rewrite, not
     /// a runtime operation, so this means the rules never fired.
     UnreducedDiff,
+    /// The compiled program would need more than 65536 slots or constants.
+    /// Slot recycling keeps real programs far below this.
+    ProgramTooLarge(&'static str),
 }
 
 impl fmt::Display for EvalError {
@@ -28,6 +31,9 @@ impl fmt::Display for EvalError {
             EvalError::UnreducedDiff => f.write_str(
                 "the expression still contains a `d(...)` that the rules could not eliminate",
             ),
+            EvalError::ProgramTooLarge(what) => {
+                write!(f, "the expression needs more than 65536 {}", what)
+            }
         }
     }
 }

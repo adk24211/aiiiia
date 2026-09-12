@@ -19,6 +19,14 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Index;
 
+/// How many times `rebuild` will re-run the analysis before giving up on
+/// further precision. See the comment at its use.
+const MAX_REBUILD_ROUNDS: usize = 100;
+
+/// Class recomputations one analysis pass may perform, as a multiple of the
+/// number of classes plus a constant floor for small graphs.
+const ANALYSIS_POPS_PER_CLASS: usize = 32;
+
 /// A set of e-nodes known to be equivalent, plus the analysis fact that holds
 /// for the value they all denote.
 #[derive(Clone, Debug)]
@@ -71,6 +79,10 @@ pub struct EGraph<A: Analysis> {
     pending: Vec<Id>,
     /// Classes whose analysis fact changed and must be re-propagated.
     analysis_pending: Vec<Id>,
+    /// Running totals. The saturation loop reads its node budget between every
+    /// pair of rules, so these must not cost a scan of the whole graph.
+    node_count: usize,
+    class_count: usize,
     clean: bool,
 }
 
@@ -89,6 +101,8 @@ impl<A: Analysis> EGraph<A> {
             classes: Vec::new(),
             pending: Vec::new(),
             analysis_pending: Vec::new(),
+            node_count: 0,
+            class_count: 0,
             clean: true,
         }
     }
@@ -109,16 +123,20 @@ impl<A: Analysis> EGraph<A> {
 
     /// Number of e-classes.
     pub fn number_of_classes(&self) -> usize {
-        self.classes.iter().filter(|c| c.is_some()).count()
+        debug_assert_eq!(
+            self.class_count,
+            self.classes.iter().filter(|c| c.is_some()).count()
+        );
+        self.class_count
     }
 
     /// Total number of e-nodes across all classes.
+    ///
+    /// Exact once the graph is clean. While it is dirty the count includes
+    /// nodes that a pending rebuild will deduplicate away, which is the right
+    /// direction for a budget check to err in.
     pub fn total_nodes(&self) -> usize {
-        self.classes
-            .iter()
-            .filter_map(|c| c.as_ref())
-            .map(|c| c.nodes.len())
-            .sum()
+        self.node_count
     }
 
     pub fn stats(&self) -> EGraphStats {
@@ -219,6 +237,8 @@ impl<A: Analysis> EGraph<A> {
         }
 
         self.memo.insert(node, id);
+        self.node_count += 1;
+        self.class_count += 1;
         A::modify(self, id);
         self.find(id)
     }
@@ -281,6 +301,7 @@ impl<A: Analysis> EGraph<A> {
         if changed {
             self.analysis_pending.push(root);
         }
+        self.class_count -= 1;
         self.clean = false;
         true
     }
@@ -298,6 +319,7 @@ impl<A: Analysis> EGraph<A> {
     /// to a fixpoint. Returns the number of e-class merges performed.
     pub fn rebuild(&mut self) -> usize {
         let mut unions = 0;
+        let mut rounds = 0usize;
         loop {
             unions += self.restore_congruence();
             for id in self.propagate_analysis() {
@@ -306,6 +328,22 @@ impl<A: Analysis> EGraph<A> {
                 }
             }
             if self.pending.is_empty() && self.analysis_pending.is_empty() {
+                break;
+            }
+            rounds += 1;
+            // Congruence closure always terminates; an e-class analysis need
+            // not. Intervals have infinite descending chains, and an e-graph's
+            // parent relation can be cyclic, so a class can feed its own
+            // refinement forever. Giving up on further precision is the
+            // standard answer -- every fact still in place was computed from
+            // the facts below it, so it stays sound.
+            //
+            // Congruence is *not* optional, though: abandoning the worklist
+            // would leave the graph with two e-classes for one term. Drain it
+            // before returning.
+            if rounds > MAX_REBUILD_ROUNDS {
+                self.analysis_pending.clear();
+                unions += self.restore_congruence();
                 break;
             }
         }
@@ -397,8 +435,15 @@ impl<A: Analysis> EGraph<A> {
         let mut in_queue: HashSet<Id> = forced.clone();
         let mut queue: Vec<Id> = seeds;
         let mut changed_any: Vec<Id> = Vec::new();
+        let mut fuel = ANALYSIS_POPS_PER_CLASS
+            .saturating_mul(self.class_count)
+            .saturating_add(1024);
 
         while let Some(id) = queue.pop() {
+            if fuel == 0 {
+                break;
+            }
+            fuel -= 1;
             let id = self.find_mut(id);
             in_queue.remove(&id);
             if self.classes[id.index()].is_none() {
@@ -459,8 +504,18 @@ impl<A: Analysis> EGraph<A> {
             self.class_mut(id).parents.clear();
         }
 
+        self.node_count = ids
+            .iter()
+            .map(|id| {
+                self.classes[id.index()]
+                    .as_ref()
+                    .expect("class")
+                    .nodes
+                    .len()
+            })
+            .sum();
         self.memo.clear();
-        self.memo.reserve(self.total_nodes());
+        self.memo.reserve(self.node_count);
         let mut parents: Vec<(Id, ENode, Id)> = Vec::new();
         for &id in &ids {
             let nodes = self.classes[id.index()]

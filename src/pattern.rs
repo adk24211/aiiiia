@@ -108,9 +108,57 @@ impl SearchMatches {
     }
 }
 
-/// A hard cap on the substitutions a single e-class may produce, so that a
-/// pathological pattern cannot hang the matcher.
-const MAX_SUBSTS_PER_CLASS: usize = 2_000;
+/// A hard cap on the substitutions a single e-class may produce.
+///
+/// A pattern with several variables over a class holding many equivalent terms
+/// has a combinatorial number of matches, and enumerating them all is both
+/// hopeless and pointless: the rule fires on each, and the first few hundred
+/// already union everything the rest would.
+const MAX_SUBSTS_PER_CLASS: usize = 512;
+
+/// A cap on the substitutions one whole search may produce.
+///
+/// Without it a single rule can spend unbounded time before the saturation
+/// loop gets a chance to check its clock. [`Pattern::search_capped`] reports
+/// when it stops early so the caller can say so rather than quietly claiming
+/// full coverage.
+pub const MAX_SUBSTS_PER_SEARCH: usize = 20_000;
+
+/// A cap on the *work* one whole search may do.
+///
+/// Capping results is not enough: a pattern can descend through thousands of
+/// e-nodes and fail at the last level every time, producing nothing while
+/// spending everything. Only a counter on steps taken bounds that.
+pub const MAX_MATCH_STEPS: usize = 400_000;
+
+/// Remaining matcher work, shared across one search.
+struct Budget {
+    steps: usize,
+    exhausted: bool,
+}
+
+impl Budget {
+    fn new(steps: usize) -> Budget {
+        Budget {
+            steps,
+            exhausted: false,
+        }
+    }
+
+    #[inline]
+    fn spend(&mut self) -> bool {
+        match self.steps.checked_sub(1) {
+            Some(n) => {
+                self.steps = n;
+                true
+            }
+            None => {
+                self.exhausted = true;
+                false
+            }
+        }
+    }
+}
 
 impl Pattern {
     /// Build a pattern from a parsed expression. Variables whose names begin
@@ -186,8 +234,18 @@ impl Pattern {
         egraph: &EGraph<A>,
         class: Id,
     ) -> Option<SearchMatches> {
+        let mut budget = Budget::new(MAX_MATCH_STEPS);
+        self.search_eclass_within(egraph, class, &mut budget)
+    }
+
+    fn search_eclass_within<A: Analysis>(
+        &self,
+        egraph: &EGraph<A>,
+        class: Id,
+        budget: &mut Budget,
+    ) -> Option<SearchMatches> {
         let mut out = Vec::new();
-        self.match_node(egraph, self.root(), class, Subst::new(), &mut out);
+        self.match_node(egraph, self.root(), class, Subst::new(), &mut out, budget);
         if out.is_empty() {
             return None;
         }
@@ -202,16 +260,36 @@ impl Pattern {
     /// Search every e-class. E-classes are visited in id order, so the result
     /// is deterministic.
     pub fn search<A: Analysis>(&self, egraph: &EGraph<A>) -> Vec<SearchMatches> {
+        self.search_capped(egraph, MAX_SUBSTS_PER_SEARCH).0
+    }
+
+    /// Search every e-class, stopping once `cap` substitutions have been
+    /// found. The second component is true when the search was cut short.
+    pub fn search_capped<A: Analysis>(
+        &self,
+        egraph: &EGraph<A>,
+        cap: usize,
+    ) -> (Vec<SearchMatches>, bool) {
         let root_op = self.root_op();
-        egraph
-            .classes()
-            .filter(|c| match root_op {
-                // Skip classes that cannot possibly contain the root operator.
-                Some(op) => c.nodes.iter().any(|n| n.op == op),
-                None => true,
-            })
-            .filter_map(|c| self.search_eclass(egraph, c.id))
-            .collect()
+        let mut out = Vec::new();
+        let mut total = 0usize;
+        let mut budget = Budget::new(MAX_MATCH_STEPS);
+        for class in egraph.classes() {
+            // Skip classes that cannot possibly contain the root operator.
+            if let Some(op) = root_op {
+                if !class.nodes.iter().any(|n| n.op == op) {
+                    continue;
+                }
+            }
+            if total >= cap || budget.exhausted {
+                return (out, true);
+            }
+            if let Some(m) = self.search_eclass_within(egraph, class.id, &mut budget) {
+                total += m.len();
+                out.push(m);
+            }
+        }
+        (out, budget.exhausted)
     }
 
     fn match_node<A: Analysis>(
@@ -221,8 +299,9 @@ impl Pattern {
         class: Id,
         subst: Subst,
         out: &mut Vec<Subst>,
+        budget: &mut Budget,
     ) {
-        if out.len() >= MAX_SUBSTS_PER_CLASS {
+        if out.len() >= MAX_SUBSTS_PER_CLASS || !budget.spend() {
             return;
         }
         match &self.nodes[pat] {
@@ -248,11 +327,21 @@ impl Pattern {
                     if node.op != *op {
                         continue;
                     }
+                    if budget.exhausted {
+                        return;
+                    }
                     if pat_children.is_empty() {
                         out.push(subst.clone());
                         continue;
                     }
-                    self.match_children(egraph, pat_children, &node.children, subst.clone(), out);
+                    self.match_children(
+                        egraph,
+                        pat_children,
+                        &node.children,
+                        subst.clone(),
+                        out,
+                        budget,
+                    );
                     // Commutative nodes are stored with their children in a
                     // canonical order, so the matcher must try the other one.
                     if op.is_commutative()
@@ -260,7 +349,14 @@ impl Pattern {
                         && node.children[0] != node.children[1]
                     {
                         let swapped = [node.children[1], node.children[0]];
-                        self.match_children(egraph, pat_children, &swapped, subst.clone(), out);
+                        self.match_children(
+                            egraph,
+                            pat_children,
+                            &swapped,
+                            subst.clone(),
+                            out,
+                            budget,
+                        );
                     }
                 }
             }
@@ -274,13 +370,22 @@ impl Pattern {
         args: &[Id],
         subst: Subst,
         out: &mut Vec<Subst>,
+        budget: &mut Budget,
     ) {
         debug_assert_eq!(pats.len(), args.len());
         let mut frontier = vec![subst];
         for (&p, &a) in pats.iter().zip(args) {
             let mut next = Vec::new();
             for s in frontier {
-                self.match_node(egraph, p, a, s, &mut next);
+                self.match_node(egraph, p, a, s, &mut next, budget);
+                // The frontier is the cartesian product of the matches found
+                // so far, so it grows multiplicatively with each argument.
+                // Capping `out` alone would not help: the blowup happens here,
+                // before a single substitution reaches the caller.
+                if next.len() >= MAX_SUBSTS_PER_CLASS {
+                    next.truncate(MAX_SUBSTS_PER_CLASS);
+                    break;
+                }
             }
             if next.is_empty() {
                 return;
@@ -288,6 +393,7 @@ impl Pattern {
             frontier = next;
         }
         out.extend(frontier);
+        out.truncate(MAX_SUBSTS_PER_CLASS);
     }
 
     // -- instantiation ------------------------------------------------------

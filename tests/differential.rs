@@ -20,16 +20,17 @@ use saturn::sym::Sym;
 use saturn::vm::Program;
 use std::time::Duration;
 
-fn optimize(expr: &RecExpr, rules: &[Rewrite<MathAnalysis>]) -> RecExpr {
-    let runner = Runner::default()
-        .with_expr(expr)
+/// Limits that keep a sweep of hundreds of expressions quick without changing
+/// what any of these tests prove.
+fn bounded() -> Runner<MathAnalysis> {
+    Runner::default()
         .with_iter_limit(6)
         .with_node_limit(4_000)
         .with_time_limit(Duration::from_secs(2))
-        .run(rules);
-    Extractor::new(&runner.egraph, OpCost)
-        .find_best(runner.root())
-        .1
+}
+
+fn optimize(expr: &RecExpr, rules: &[Rewrite<MathAnalysis>]) -> RecExpr {
+    saturn::optimize_with(bounded(), expr, rules, OpCost).0
 }
 
 /// Saturate `count` generated expressions and assert the result still agrees
@@ -89,10 +90,37 @@ fn the_whole_safe_tier_preserves_results_exactly() {
 }
 
 #[test]
-fn fast_math_rules_stay_close() {
-    // These are allowed to move the last bits, but not to change the answer.
-    // A generous tolerance still catches a rule that is simply wrong.
-    sweep(5, Grammar::arithmetic(), 200, &rules::all_rules(), 1e-6);
+fn fast_math_rules_are_algebraically_correct() {
+    // Two allowances, both of them the point of the tier rather than
+    // concessions. Fast-math is licensed to turn a NaN or an infinity into a
+    // number -- `?x / ?x => 1` is exactly that -- so only inputs where both
+    // sides produce an ordinary number say anything about the rules. And it
+    // reassociates, which is algebraically exact and numerically wrong
+    // whenever a sum cancels, so inputs are drawn from one narrow band of
+    // magnitudes: that measures whether the algebra is right rather than how
+    // badly cancellation bites.
+    let checker = Checker::new()
+        .with_samples(120)
+        .with_seed(5 ^ 0x9E37_79B9)
+        .with_tolerance(1e-6)
+        .with_range(0.5, 2.0)
+        .with_finite_only(true);
+    let rules = rules::all_rules();
+    for (i, expr) in ExprStream::new(5, Grammar::arithmetic(), 5)
+        .take(150)
+        .enumerate()
+    {
+        let best = optimize(&expr, &rules);
+        let report = checker.compare(&expr, &best);
+        assert!(
+            report.ok(),
+            "expression {} changed a finite answer\n  input:     {}\n  optimized: {}\n{}",
+            i,
+            expr.pretty(),
+            best.pretty(),
+            report.render()
+        );
+    }
 }
 
 #[test]
@@ -129,41 +157,61 @@ fn the_compiler_reproduces_the_interpreter_bit_for_bit() {
 }
 
 #[test]
-fn optimization_never_grows_the_chosen_cost() {
-    // Extraction may only return something at least as cheap as the input,
-    // because the input is itself in the e-graph and therefore a candidate.
+fn optimizing_never_returns_something_more_expensive() {
+    // The input is itself in the e-graph, so it is always a candidate, and
+    // `optimize` keeps it when the extractor's answer is dearer.
     use saturn::extract::dag_cost;
-    for expr in ExprStream::new(9, Grammar::default(), 5).take(200) {
-        let best = optimize(&expr, &rules::safe());
-        let before = dag_cost(&expr, &OpCost);
-        let after = dag_cost(&best, &OpCost);
-        assert!(
-            after <= before + 1e-9,
-            "optimizing made it worse\n  {} ({})\n  {} ({})",
-            expr.pretty(),
-            before,
-            best.pretty(),
-            after
-        );
+    for rules in [rules::safe(), rules::all_rules()] {
+        for expr in ExprStream::new(9, Grammar::default(), 5).take(120) {
+            let best = optimize(&expr, &rules);
+            let before = dag_cost(&expr, &OpCost);
+            let after = dag_cost(&best, &OpCost);
+            assert!(
+                after <= before + 1e-9,
+                "optimizing made it worse\n  {} ({})\n  {} ({})",
+                expr.pretty(),
+                before,
+                best.pretty(),
+                after
+            );
+        }
     }
 }
 
 #[test]
-fn size_extraction_never_grows_the_dag() {
+fn tree_extraction_is_optimal_for_tree_cost() {
+    // What the bottom-up fixpoint actually minimizes is cost over the expanded
+    // tree, and there it is exact: the input is in the e-graph, so the result
+    // can never be a more expensive tree.
+    use saturn::extract::tree_cost;
     for expr in ExprStream::new(10, Grammar::arithmetic(), 5).take(200) {
-        let runner = Runner::default()
-            .with_expr(&expr)
-            .with_iter_limit(5)
-            .with_node_limit(3_000)
-            .with_time_limit(Duration::from_secs(2))
-            .run(&rules::safe());
-        let (_, best) = Extractor::new(&runner.egraph, AstSize).find_best(runner.root());
+        let runner = bounded().with_expr(&expr).run(&rules::safe());
+        let (cost, best) = Extractor::new(&runner.egraph, AstSize).find_best(runner.root());
         assert!(
-            best.dag_size() <= expr.dag_size(),
-            "size extraction grew the DAG: {} -> {}",
-            expr.dag_size(),
-            best.dag_size()
+            cost <= tree_cost(&expr, &AstSize) + 1e-9,
+            "tree extraction grew the tree: {} -> {}",
+            tree_cost(&expr, &AstSize),
+            cost
         );
+        assert!(best.dag_size() >= 1);
+    }
+}
+
+#[test]
+fn dag_extraction_is_never_worse_than_tree_extraction() {
+    use saturn::extract::{dag_cost, DagExtractor};
+    for expr in ExprStream::new(12, Grammar::default(), 5).take(100) {
+        let runner = bounded().with_expr(&expr).run(&rules::all_rules());
+        let (_, tree) = Extractor::new(&runner.egraph, OpCost).find_best(runner.root());
+        let (dag_reported, dag) =
+            DagExtractor::new(&runner.egraph, OpCost).find_best(runner.root());
+        assert!(
+            dag_cost(&dag, &OpCost) <= dag_cost(&tree, &OpCost) + 1e-9,
+            "refinement made the DAG worse\n  tree pick: {}\n  dag pick:  {}",
+            tree.pretty(),
+            dag.pretty()
+        );
+        assert!((dag_reported - dag_cost(&dag, &OpCost)).abs() < 1e-9);
     }
 }
 

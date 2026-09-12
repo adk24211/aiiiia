@@ -9,7 +9,7 @@
 use crate::analysis::Analysis;
 use crate::egraph::EGraph;
 use crate::lang::{ENode, Id, Op, RecExpr};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A cost assigned to each e-node, given its children's costs.
 ///
@@ -93,82 +93,159 @@ impl<F: Fn(&ENode, &dyn Fn(Id) -> f64) -> f64> CostFunction for FnCost<F> {
     }
 }
 
-/// Extracts the cheapest term from each e-class.
+/// A chosen e-node for each e-class, with the cost of the term it roots.
+type Selection = HashMap<Id, (f64, ENode)>;
+
+/// Solve `cost[class] = min over nodes of cost(node)` by iterating to a
+/// fixpoint.
+///
+/// Costs only ever decrease and are bounded below, so this terminates. A class
+/// whose every node sits in a cycle with no grounded base case simply never
+/// gets a cost, which is the right answer: no finite term in it exists.
+///
+/// Classes in `free` cost nothing to *use*. That is how [`DagExtractor`]
+/// expresses "this subterm is already being emitted, so a second reference to
+/// it is not a second computation".
+fn solve<A: Analysis, C: CostFunction>(
+    egraph: &EGraph<A>,
+    cost_fn: &C,
+    free: &HashSet<Id>,
+) -> Selection {
+    let mut best: Selection = HashMap::new();
+    loop {
+        let mut changed = false;
+        for class in egraph.classes() {
+            let mut current: Option<(f64, ENode)> = None;
+            for node in &class.nodes {
+                let mut known = true;
+                for &c in &node.children {
+                    let c = egraph.find(c);
+                    if !free.contains(&c) && !best.contains_key(&c) {
+                        known = false;
+                        break;
+                    }
+                }
+                if !known {
+                    continue;
+                }
+                let lookup = |id: Id| {
+                    let id = egraph.find(id);
+                    if free.contains(&id) {
+                        0.0
+                    } else {
+                        best[&id].0
+                    }
+                };
+                let c = cost_fn.cost(node, &lookup);
+                if current.as_ref().map(|(bc, _)| c < *bc).unwrap_or(true) {
+                    current = Some((c, node.clone()));
+                }
+            }
+            let Some((c, node)) = current else { continue };
+            match best.get(&class.id) {
+                Some((old, _)) if *old <= c => {}
+                _ => {
+                    best.insert(class.id, (c, node));
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return best;
+        }
+    }
+}
+
+/// Build the term a selection roots at `root`, or `None` if the selection is
+/// cyclic there.
+///
+/// The optimal tree-cost selection is always acyclic, because every non-leaf
+/// operator costs something and a cycle would need a node that costs nothing.
+/// A *discounted* selection has no such guarantee, so this reports the problem
+/// instead of looping.
+fn build_from<A: Analysis>(egraph: &EGraph<A>, selection: &Selection, root: Id) -> Option<RecExpr> {
+    fn go<A: Analysis>(
+        egraph: &EGraph<A>,
+        selection: &Selection,
+        class: Id,
+        expr: &mut RecExpr,
+        memo: &mut HashMap<Id, Id>,
+        on_stack: &mut Vec<Id>,
+    ) -> Option<Id> {
+        let class = egraph.find(class);
+        if let Some(&id) = memo.get(&class) {
+            return Some(id);
+        }
+        if on_stack.contains(&class) {
+            return None;
+        }
+        on_stack.push(class);
+        let node = &selection.get(&class)?.1;
+        let mut children = Vec::with_capacity(node.children.len());
+        for &c in &node.children {
+            children.push(go(egraph, selection, c, expr, memo, on_stack)?);
+        }
+        on_stack.pop();
+        let id = expr.op(node.op, children);
+        memo.insert(class, id);
+        Some(id)
+    }
+
+    let root = egraph.find(root);
+    let mut expr = RecExpr::new();
+    let mut memo = HashMap::new();
+    let id = go(
+        egraph,
+        selection,
+        root,
+        &mut expr,
+        &mut memo,
+        &mut Vec::new(),
+    )?;
+    Some(expr.compact(id))
+}
+
+/// The e-classes a selection actually materializes, reachable from `root`.
+fn materialized<A: Analysis>(egraph: &EGraph<A>, selection: &Selection, root: Id) -> HashSet<Id> {
+    let mut seen = HashSet::new();
+    let mut stack = vec![egraph.find(root)];
+    while let Some(c) = stack.pop() {
+        if !seen.insert(c) {
+            continue;
+        }
+        if let Some((_, node)) = selection.get(&c) {
+            for &child in &node.children {
+                stack.push(egraph.find(child));
+            }
+        }
+    }
+    seen
+}
+
+/// Extracts the cheapest term from each e-class, minimizing cost over the
+/// expression **tree**.
 pub struct Extractor<'a, A: Analysis, C: CostFunction> {
     egraph: &'a EGraph<A>,
     cost_fn: C,
-    /// Best cost and chosen node per canonical class id.
-    best: HashMap<Id, (f64, ENode)>,
-    /// Classes in the order they first reached a finite cost. A node is only
-    /// ever chosen once all its children are settled, so this order is a
-    /// topological sort of the extracted DAG.
-    order: Vec<Id>,
+    best: Selection,
 }
 
 impl<'a, A: Analysis, C: CostFunction> Extractor<'a, A, C> {
     pub fn new(egraph: &'a EGraph<A>, cost_fn: C) -> Extractor<'a, A, C> {
-        let mut e = Extractor {
+        let best = solve(egraph, &cost_fn, &HashSet::new());
+        Extractor {
             egraph,
             cost_fn,
-            best: HashMap::new(),
-            order: Vec::new(),
-        };
-        e.compute();
-        e
-    }
-
-    fn node_cost(&self, node: &ENode, best: &HashMap<Id, (f64, ENode)>) -> Option<f64> {
-        for &c in &node.children {
-            best.get(&self.egraph.find(c))?;
+            best,
         }
-        let lookup = |id: Id| best[&self.egraph.find(id)].0;
-        Some(self.cost_fn.cost(node, &lookup))
     }
 
-    /// Iterate `cost[class] = min over nodes of cost(node)` to a fixpoint.
-    ///
-    /// Costs only ever decrease and are bounded below, so this terminates.
-    /// Classes whose every node is part of a cycle with no grounded base case
-    /// simply never get a cost, which is the correct answer: no finite term in
-    /// that class exists.
-    fn compute(&mut self) {
-        let mut best: HashMap<Id, (f64, ENode)> = HashMap::new();
-        let mut order: Vec<Id> = Vec::new();
-        loop {
-            let mut changed = false;
-            for class in self.egraph.classes() {
-                let mut current: Option<(f64, ENode)> = None;
-                for node in &class.nodes {
-                    let Some(c) = self.node_cost(node, &best) else {
-                        continue;
-                    };
-                    if current.as_ref().map(|(bc, _)| c < *bc).unwrap_or(true) {
-                        current = Some((c, node.clone()));
-                    }
-                }
-                let Some((c, node)) = current else { continue };
-                match best.get(&class.id) {
-                    Some((old, _)) if *old <= c => {}
-                    Some(_) => {
-                        best.insert(class.id, (c, node));
-                        changed = true;
-                    }
-                    None => {
-                        best.insert(class.id, (c, node));
-                        order.push(class.id);
-                        changed = true;
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        self.best = best;
-        self.order = order;
+    /// The cost function this extractor was built with.
+    pub fn cost_function(&self) -> &C {
+        &self.cost_fn
     }
 
-    /// The cost of the cheapest term in `class`, if it has one.
+    /// The tree cost of the cheapest term in `class`, if it has one.
     pub fn cost_of(&self, class: Id) -> Option<f64> {
         self.best.get(&self.egraph.find(class)).map(|(c, _)| *c)
     }
@@ -180,7 +257,7 @@ impl<'a, A: Analysis, C: CostFunction> Extractor<'a, A, C> {
 
     /// The cheapest term in `class`, as a maximally-shared expression DAG.
     ///
-    /// Panics if `class` contains no finite term, which can only happen if
+    /// Panics if `class` contains no finite term, which can only happen when
     /// every one of its nodes is part of a cycle.
     pub fn find_best(&self, class: Id) -> (f64, RecExpr) {
         self.try_find_best(class).unwrap_or_else(|| {
@@ -194,76 +271,78 @@ impl<'a, A: Analysis, C: CostFunction> Extractor<'a, A, C> {
     pub fn try_find_best(&self, class: Id) -> Option<(f64, RecExpr)> {
         let root = self.egraph.find(class);
         let (cost, _) = *self.best.get(&root)?;
-        let mut expr = RecExpr::new();
-        let mut memo: HashMap<Id, Id> = HashMap::new();
-        let id = self.build(root, &mut expr, &mut memo, &mut Vec::new());
-        Some((cost, expr.compact(id)))
-    }
-
-    fn build(
-        &self,
-        class: Id,
-        expr: &mut RecExpr,
-        memo: &mut HashMap<Id, Id>,
-        on_stack: &mut Vec<Id>,
-    ) -> Id {
-        let class = self.egraph.find(class);
-        if let Some(&id) = memo.get(&class) {
-            return id;
-        }
-        assert!(
-            !on_stack.contains(&class),
-            "extraction found a zero-cost cycle through e-class {:?}; \
-             every non-leaf operator must have a strictly positive cost",
-            class
-        );
-        on_stack.push(class);
-        let node = &self.best[&class].1;
-        let children: Vec<Id> = node
-            .children
-            .iter()
-            .map(|&c| self.build(c, expr, memo, on_stack))
-            .collect();
-        on_stack.pop();
-        let id = expr.op(node.op, children);
-        memo.insert(class, id);
-        id
+        let expr = build_from(self.egraph, &self.best, root)?;
+        Some((cost, expr))
     }
 }
 
-/// A second, sharing-aware pass over an already-extracted result.
+/// Extraction that accounts for sharing.
 ///
 /// Tree cost double-counts a subterm used twice, so the tree-optimal choice
-/// can be worse than another once common subexpressions are emitted once.
-/// Picking the true DAG-optimal term is NP-hard; this walks the classes in
-/// dependency order and re-scores each one against the nodes already chosen,
-/// charging nothing for a class it has decided to materialize anyway. It is a
-/// heuristic: it never makes the DAG larger, but it is not guaranteed optimal.
+/// can be worse than another once common subexpressions are emitted only once.
+/// Choosing the true DAG-optimal term is NP-hard. This does the standard
+/// thing: extract by tree cost, then repeatedly re-solve with every class the
+/// current answer already materializes priced at zero, keeping whichever round
+/// produced the cheapest DAG.
+///
+/// It is a heuristic. It never returns something worse than the tree-optimal
+/// answer, because that answer is the first candidate, but it is not
+/// guaranteed optimal.
 pub struct DagExtractor<'a, A: Analysis, C: CostFunction> {
-    inner: Extractor<'a, A, C>,
+    egraph: &'a EGraph<A>,
+    cost_fn: C,
+    rounds: usize,
 }
 
 impl<'a, A: Analysis, C: CostFunction> DagExtractor<'a, A, C> {
     pub fn new(egraph: &'a EGraph<A>, cost_fn: C) -> DagExtractor<'a, A, C> {
         DagExtractor {
-            inner: Extractor::new(egraph, cost_fn),
+            egraph,
+            cost_fn,
+            rounds: 6,
         }
     }
 
-    /// Number of distinct nodes in the extracted DAG, and the expression.
-    pub fn find_best(&self, class: Id) -> (f64, RecExpr) {
-        let (_, tree) = self.inner.find_best(class);
-        let dag_cost = self.dag_cost(&tree);
-        (dag_cost, tree)
+    /// How many refinement rounds to run. More rounds cost time and rarely
+    /// help after the first few, which is why the default is small.
+    pub fn with_rounds(mut self, n: usize) -> Self {
+        self.rounds = n;
+        self
     }
 
-    /// Total cost counting each shared node once.
-    pub fn dag_cost(&self, expr: &RecExpr) -> f64 {
-        let zero = |_: Id| 0.0;
-        expr.reachable(expr.root())
-            .into_iter()
-            .map(|id| self.inner.cost_fn.cost(expr.node(id), &zero))
-            .sum()
+    pub fn find_best(&self, class: Id) -> (f64, RecExpr) {
+        self.try_find_best(class).unwrap_or_else(|| {
+            panic!(
+                "e-class {:?} contains no finite term; every node is cyclic",
+                self.egraph.find(class)
+            )
+        })
+    }
+
+    pub fn try_find_best(&self, class: Id) -> Option<(f64, RecExpr)> {
+        let root = self.egraph.find(class);
+        let mut selection = solve(self.egraph, &self.cost_fn, &HashSet::new());
+        let mut best = build_from(self.egraph, &selection, root)?;
+        let mut best_cost = dag_cost(&best, &self.cost_fn);
+
+        for _ in 0..self.rounds {
+            let mut free = materialized(self.egraph, &selection, root);
+            // The root is not free: something has to pay for it.
+            free.remove(&root);
+            let candidate = solve(self.egraph, &self.cost_fn, &free);
+            let Some(expr) = build_from(self.egraph, &candidate, root) else {
+                break;
+            };
+            let cost = dag_cost(&expr, &self.cost_fn);
+            if cost < best_cost {
+                best = expr;
+                best_cost = cost;
+                selection = candidate;
+            } else {
+                break;
+            }
+        }
+        Some((best_cost, best))
     }
 }
 

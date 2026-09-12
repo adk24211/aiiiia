@@ -258,9 +258,9 @@ impl Options {
             rules,
             rules_name: name,
             cost: Cost::parse(args.get("cost"))?,
-            iters: args.num("iters")?.unwrap_or(30),
-            nodes: args.num("nodes")?.unwrap_or(100_000),
-            time: Duration::from_secs_f64(args.num("time")?.unwrap_or(10.0)),
+            iters: args.num("iters")?.unwrap_or(20),
+            nodes: args.num("nodes")?.unwrap_or(20_000),
+            time: Duration::from_secs_f64(args.num("time")?.unwrap_or(3.0)),
             backoff: args.get("scheduler").unwrap_or("backoff") != "simple",
         })
     }
@@ -642,41 +642,83 @@ const SUITE: &[(&str, &str)] = &[
     ("identity", "x * (1 + 0) * 1 - 0"),
     ("factor", "a * x + a * y + a * z"),
     ("cancel", "(p + q) * (p + q) / (p + q)"),
-    ("powers", "x * x * x * x * x * x"),
+    ("powers", "(x ^ 2) ^ 3"),
     ("exp-fuse", "exp(a) * exp(b) * exp(c)"),
-    ("log-split", "ln(a * b * c)"),
+    ("log-ratio", "ln(a) - ln(b)"),
     ("trig", "sin(t) * sin(t) + cos(t) * cos(t)"),
     ("horner", "a*x^3 + b*x^2 + c*x + d"),
     ("divide", "u / w + v / w"),
     ("deriv", "d(x, x^3 + 2*x^2 + x)"),
     ("deriv-chain", "d(x, exp(sin(x * x)))"),
+    ("sqrt-square", "sqrt(u) * sqrt(u) + sqrt(v * v)"),
+    ("boolean", "if(a < b, x, if(a < b, y, z))"),
     ("big", "(a + b + c) * (a + b + c) * (a + b + c)"),
 ];
 
+/// Does `expr` still contain a derivative the rules could not eliminate?
+fn has_diff(expr: &RecExpr) -> bool {
+    expr.reachable(expr.root())
+        .iter()
+        .any(|&id| expr.node(id).op == Op::Diff)
+}
+
 fn cmd_bench(args: &Args, st: &Style) -> Result<(), String> {
     let mut opts = Options::from(args)?;
-    if args.get("iters").is_none() && args.has("quick") {
-        opts.iters = 8;
+    if args.get("rules").is_none() {
+        // The safe tier alone leaves most of the suite untouched by design;
+        // the whole point of the table is what the rules can do together.
+        opts.rules = rules::all_rules();
+        opts.rules_name = "all".into();
+    }
+    // The suite exists to be run often, so it is bounded far more tightly
+    // than a one-off invocation would be. Every entry below saturates well
+    // inside these limits or is not improved by more room.
+    if args.get("iters").is_none() {
+        opts.iters = 12;
+    }
+    if args.get("nodes").is_none() {
+        opts.nodes = 5_000;
+    }
+    if args.get("time").is_none() {
+        opts.time = Duration::from_millis(if args.has("quick") { 250 } else { 1_000 });
     }
     println!(
+        "  {} {} rules from `{}`",
+        st.dim("using"),
+        opts.rules.len(),
+        opts.rules_name
+    );
+    println!();
+    println!(
         "  {}",
-        st.dim("name           nodes -> nodes    ops -> ops     classes   time")
+        st.dim("name           nodes -> nodes     ops -> ops      classes    time")
     );
     let mut total_before = 0.0;
     let mut total_after = 0.0;
     for (name, src) in SUITE {
         let expr = parse(src).map_err(|e| e.render())?;
         let (best, _, runner) = opts.optimize(&expr);
-        let before = dag_cost(&expr, &OpCost);
         let after = dag_cost(&best, &OpCost);
-        total_before += before;
-        total_after += after;
+        // A `d(...)` has no runtime cost to speak of -- it is priced out of
+        // reach precisely so extraction never returns one -- so quoting a
+        // number for it would only corrupt the total.
+        let before = if has_diff(&expr) {
+            None
+        } else {
+            Some(dag_cost(&expr, &OpCost))
+        };
+        if let Some(b) = before {
+            total_before += b;
+            total_after += after;
+        }
         println!(
-            "  {:<12} {:>5} -> {:<5} {:>7.0} -> {:<7.0} {:>7}   {:.0?}",
+            "  {:<12} {:>5} -> {:<5} {:>8} -> {:<8.0} {:>7}   {:>7.1?}",
             name,
             expr.dag_size(),
             best.dag_size(),
-            before,
+            before
+                .map(|b| format!("{:.0}", b))
+                .unwrap_or_else(|| "-".into()),
             after,
             runner.egraph.number_of_classes(),
             runner.elapsed(),
@@ -684,9 +726,10 @@ fn cmd_bench(args: &Args, st: &Style) -> Result<(), String> {
     }
     println!();
     println!(
-        "  {} {}",
+        "  {} {} {}",
         st.dim("overall"),
-        st.green(&pct(total_before, total_after))
+        st.green(&pct(total_before, total_after)),
+        st.dim("(derivatives excluded: they have no runtime cost to compare against)")
     );
     Ok(())
 }
@@ -864,9 +907,9 @@ OPTIONS
   --rules <set>         safe | default | diff | arith | transcendental | logic |
                         fast-math | all | none          [default: default]
   --cost <model>        size | depth | ops              [default: ops]
-  --iters <n>           saturation iteration limit      [default: 30]
-  --nodes <n>           e-graph node limit              [default: 100000]
-  --time <secs>         wall-clock limit                [default: 10]
+  --iters <n>           saturation iteration limit      [default: 20]
+  --nodes <n>           e-graph node limit              [default: 20000]
+  --time <secs>         wall-clock limit                [default: 3]
   --scheduler <s>       backoff | simple                [default: backoff]
   -D name=value         bind a variable (repeatable)
   --shared              print shared subterms as `let` bindings

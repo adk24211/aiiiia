@@ -58,6 +58,49 @@ pub use parser::{parse, parse_rule};
 pub use pattern::{Pattern, SearchMatches, Subst};
 pub use rewrite::{Applier, ConditionalApplier, DynamicApplier, Rewrite};
 pub use rng::Rng;
+pub use rules::Rule;
 pub use runner::{BackoffScheduler, Iteration, RuleScheduler, Runner, SimpleScheduler, StopReason};
 pub use sym::{Sym, F};
 pub use vm::{Instr, Program};
+
+/// Saturate `expr` with `rules` and return the cheapest equivalent expression.
+///
+/// The result is never more expensive than the input under `cost_fn`: `expr`
+/// is itself in the e-graph, so it is always one of the candidates, and the
+/// DAG-aware extractor is a heuristic that can in principle miss it.
+///
+/// ```
+/// use saturn::{optimize, parse, rules, OpCost};
+///
+/// let expr = parse("u / w + v / w").unwrap();
+/// let (best, runner) = optimize(&expr, &rules::all_rules(), OpCost);
+/// assert_eq!(best.pretty(), "(u + v) / w");
+/// assert!(runner.stop_reason.is_some());
+/// ```
+pub fn optimize<C: extract::CostFunction>(
+    expr: &RecExpr,
+    rules: &[Rewrite<MathAnalysis>],
+    cost_fn: C,
+) -> (RecExpr, Runner<MathAnalysis>) {
+    optimize_with(Runner::default(), expr, rules, cost_fn)
+}
+
+/// [`optimize`], but with limits and a scheduler you choose.
+///
+/// The runner must not already have a root expression; `expr` becomes its
+/// only one.
+pub fn optimize_with<C: extract::CostFunction>(
+    runner: Runner<MathAnalysis>,
+    expr: &RecExpr,
+    rules: &[Rewrite<MathAnalysis>],
+    cost_fn: C,
+) -> (RecExpr, Runner<MathAnalysis>) {
+    let runner = runner.with_expr(expr).run(rules);
+    let input_cost = extract::dag_cost(expr, &cost_fn);
+    let (cost, best) = extract::DagExtractor::new(&runner.egraph, cost_fn).find_best(runner.root());
+    if cost <= input_cost {
+        (best, runner)
+    } else {
+        (expr.clone(), runner)
+    }
+}
