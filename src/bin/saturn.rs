@@ -5,7 +5,7 @@ use saturn::check::Checker;
 use saturn::codegen::{emit, Lang};
 use saturn::egraph::EGraph;
 use saturn::eval::{eval, parse_bindings, Env};
-use saturn::extract::{dag_cost, tree_cost, AstDepth, AstSize, Extractor, OpCost};
+use saturn::extract::{dag_cost, tree_cost, AstDepth, AstSize, DagExtractor, OpCost};
 use saturn::gen::{ExprStream, Grammar};
 use saturn::lang::{Op, RecExpr};
 use saturn::parser::parse;
@@ -269,11 +269,26 @@ impl Cost {
             Cost::Ops => "ops",
         }
     }
-    fn extract(&self, eg: &EGraph<MathAnalysis>, root: saturn::Id) -> (f64, RecExpr) {
-        match self {
-            Cost::Size => Extractor::new(eg, AstSize).find_best(root),
-            Cost::Depth => Extractor::new(eg, AstDepth).find_best(root),
-            Cost::Ops => Extractor::new(eg, OpCost).find_best(root),
+    /// Extract with sharing accounted for, and never return something more
+    /// expensive than `input` -- which is always a candidate, since it is in
+    /// the e-graph, and which the DAG-aware extractor is a heuristic that can
+    /// in principle miss.
+    fn extract(
+        &self,
+        eg: &EGraph<MathAnalysis>,
+        root: saturn::Id,
+        input: &RecExpr,
+    ) -> (f64, RecExpr) {
+        let (cost, best) = match self {
+            Cost::Size => DagExtractor::new(eg, AstSize).find_best(root),
+            Cost::Depth => DagExtractor::new(eg, AstDepth).find_best(root),
+            Cost::Ops => DagExtractor::new(eg, OpCost).find_best(root),
+        };
+        let before = self.dag(input);
+        if cost <= before {
+            (cost, best)
+        } else {
+            (before, input.clone())
         }
     }
     fn dag(&self, e: &RecExpr) -> f64 {
@@ -332,7 +347,7 @@ impl Options {
     /// Saturate and extract, returning the optimized expression and the run.
     fn optimize(&self, expr: &RecExpr) -> (RecExpr, f64, Runner<MathAnalysis>) {
         let runner = self.run(expr);
-        let (cost, best) = self.cost.extract(&runner.egraph, runner.root());
+        let (cost, best) = self.cost.extract(&runner.egraph, runner.root(), expr);
         (best, cost, runner)
     }
 }
@@ -1078,12 +1093,10 @@ fn cmd_repl(st: &Style) -> Result<(), String> {
             Err(e) => println!("{}", st.red(&e.render())),
             Ok(expr) => {
                 let runner = Runner::default()
-                    .with_expr(&expr)
                     .with_iter_limit(20)
                     .with_time_limit(Duration::from_secs(3))
-                    .with_scheduler(BackoffScheduler::default())
-                    .run(&opts_rules);
-                let (_, best) = Extractor::new(&runner.egraph, OpCost).find_best(runner.root());
+                    .with_scheduler(BackoffScheduler::default());
+                let (best, _) = saturn::optimize_with(runner, &expr, &opts_rules, OpCost);
                 println!("  {}", st.bold(&best.pretty()));
                 if best.vars().iter().all(|v| env.contains_key(v)) && !best.vars().is_empty() {
                     if let Ok(v) = eval(&best, &env) {

@@ -53,14 +53,14 @@ $ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --stats
   optimized x * (c + x * (b + x * a)) + d
             11 nodes, 15.625 ops  91% cheaper
 
-  e-graph   32 classes, 61 nodes, 6 iterations, 1.2ms (saturated)
+  e-graph   32 classes, 61 nodes, 6 iterations, 2.2ms (saturated)
   rules     201 rules from `all`
 
   stopped: saturated
   iterations: 6
   classes: 32
   nodes: 61
-  total time: 1.23ms
+  total time: 2.24ms
   rules that fired:
         20  assoc-add
          8  factor
@@ -69,12 +69,12 @@ $ saturn opt 'a*x^3 + b*x^2 + c*x + d' --rules all --stats
          1  mul-pow
 
   iteration    classes    nodes   matches   time
-          0         19       25         7   116.9µs
-          1         29       47        33   141.3µs
-          2         31       56        89   209.0µs
-          3         34       63       123   270.6µs
-          4         32       61       141   249.8µs
-          5         32       61       141   238.7µs
+          0         19       25         7   194.0µs
+          1         29       47        33   217.7µs
+          2         31       56        89   450.4µs
+          3         34       63       123   467.7µs
+          4         32       61       141   453.2µs
+          5         32       61       141   456.8µs
 ```
 
 Every rule that fired is a one-line local identity. Horner's form is what falls
@@ -93,7 +93,7 @@ $ saturn opt 'u / w + v / w' --rules all
   optimized (u + v) / w
             5 nodes, 16.375 ops  48% cheaper
 
-  e-graph   7 classes, 8 nodes, 2 iterations, 131.4µs (saturated)
+  e-graph   7 classes, 8 nodes, 2 iterations, 142.1µs (saturated)
   rules     201 rules from `all`
 ```
 
@@ -151,9 +151,9 @@ $ saturn time 'a*x^3 + b*x^2 + c*x + d' --rules all
   optimized x * (c + x * (b + x * a)) + d
 
                           ns/eval   speedup
-  interpreted                928.2   1.0x
-  compiled                    74.7   12.4x
-  compiled + optimized        28.5   32.5x
+  interpreted                932.1   1.0x
+  compiled                    74.6   12.5x
+  compiled + optimized        29.5   31.5x
 
   program 15 -> 11 instructions, 5 -> 5 slots, 201 rules from `all`
 ```
@@ -318,20 +318,20 @@ $ saturn bench
   using 201 rules from `all`
 
   name           nodes -> nodes     ops -> ops      classes    time
-  identity         7 -> 1           10 -> 0            839   324.8ms
-  factor           9 -> 7           14 -> 6             15   439.4µs
-  cancel           5 -> 3           20 -> 1            934    71.3ms
-  powers           5 -> 5          160 -> 16          1177   171.1ms
-  exp-fuse         8 -> 6          143 -> 47            14   377.9µs
-  log-ratio        5 -> 4           91 -> 60             8   195.9µs
-  trig             6 -> 1          129 -> 0              7   138.8µs
+  identity         7 -> 1           10 -> 0            839   318.7ms
+  factor           9 -> 7           14 -> 6             15   408.2µs
+  cancel           5 -> 3           20 -> 1            934    71.6ms
+  powers           5 -> 5          160 -> 16          1177   169.2ms
+  exp-fuse         8 -> 6          143 -> 47            14   412.8µs
+  log-ratio        5 -> 4           91 -> 60             8   184.7µs
+  trig             6 -> 1          129 -> 0              7   135.6µs
   horner          15 -> 11         176 -> 16            32     1.2ms
-  divide           6 -> 5           31 -> 16             7   130.8µs
-  deriv            9 -> 8            - -> 8           1302   712.6ms
-  deriv-chain      5 -> 8            - -> 178          853   334.9ms
-  sqrt-square      7 -> 6           49 -> 26             8   176.9µs
-  boolean          8 -> 6            6 -> 4              8   129.9µs
-  big              7 -> 7           10 -> 10           557    53.7ms
+  divide           6 -> 5           31 -> 16             7   126.0µs
+  deriv            9 -> 8            - -> 8           1302   705.2ms
+  deriv-chain      5 -> 8            - -> 178          853   341.4ms
+  sqrt-square      7 -> 6           49 -> 26             8   177.3µs
+  boolean          8 -> 6            6 -> 4              8   127.9µs
+  big              7 -> 7           10 -> 10           557    54.9ms
 
   overall 76% cheaper (derivatives excluded: they have no runtime cost to compare against)
 ```
