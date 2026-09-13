@@ -274,6 +274,68 @@ fn to_ipv4_mapped(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     })
 }
 
+/// A DNS resolver that applies the policy, for the HTTP client to use.
+///
+/// Filtering here rather than before the request closes the last gap. Checking
+/// a name and then handing the *name* to the client leaves a window in which
+/// the answer can change between the check and the connection; a resolver that
+/// refuses forbidden addresses is consulted by the connection itself, so the
+/// address that is checked is the address that is dialled, always.
+pub struct Resolver {
+    policy: Policy,
+}
+
+impl Resolver {
+    pub fn new(policy: Policy) -> Resolver {
+        Resolver { policy }
+    }
+}
+
+impl reqwest::dns::Resolve for Resolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        let allow_private = self.policy.allow_private;
+        Box::pin(async move {
+            // Port zero: reqwest replaces it with the one from the URL.
+            let lookup = tokio::task::spawn_blocking(move || {
+                (host.as_str(), 0u16)
+                    .to_socket_addrs()
+                    .map(|it| it.collect::<Vec<_>>())
+                    .map_err(|_| Rejected::Unresolvable(host.clone()))
+                    .and_then(|addrs| {
+                        if addrs.is_empty() {
+                            return Err(Rejected::Unresolvable(host.clone()));
+                        }
+                        if !allow_private {
+                            // Every address, not just the first: a name that
+                            // answers with one public and one private address
+                            // must not get through on the public one.
+                            for addr in &addrs {
+                                if let Some(why) = forbidden(addr.ip()) {
+                                    return Err(Rejected::PrivateAddress {
+                                        host: host.clone(),
+                                        addr: addr.ip(),
+                                        why,
+                                    });
+                                }
+                            }
+                        }
+                        Ok(addrs)
+                    })
+            })
+            .await
+            .map_err(|e| {
+                Box::new(std::io::Error::other(e.to_string())) as crate::guard::BoxError
+            })?;
+
+            let addrs = lookup.map_err(|e| Box::new(e) as crate::guard::BoxError)?;
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
