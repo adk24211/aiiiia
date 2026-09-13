@@ -28,6 +28,7 @@ fn main() -> std::process::ExitCode {
         "migrate" => runtime.block_on(migrate()),
         "key" | "keys" => runtime.block_on(keys(&args[1..])),
         "verify" => verify(&args[1..]),
+        "health" => runtime.block_on(health()),
         "version" | "--version" | "-V" => {
             println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -55,6 +56,7 @@ hookline — reliable webhook delivery
 
     hookline serve                     run the server (the default)
     hookline migrate                   create or update the database and exit
+    hookline health                    ask a running server whether it is well
     hookline key create <name> [scope] mint a credential; scope is admin,
                                        publish (the default) or read
     hookline key list                  list credentials
@@ -109,6 +111,30 @@ async fn serve() -> Result<(), String> {
         );
     }
     server.run().await
+}
+
+/// Ask a running server for its health route.
+///
+/// Here so that a container health check needs no `curl` in the image: an
+/// image that carries a shell and an HTTP client to check on itself has a
+/// larger attack surface than the thing it is checking.
+async fn health() -> Result<(), String> {
+    let config = Config::from_env()?;
+    let url = format!("http://{}/health", config.listen);
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| e.to_string())?
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("{} is not answering: {}", url, e))?;
+    if !response.status().is_success() {
+        return Err(format!("{} answered {}", url, response.status()));
+    }
+    println!("{}", response.text().await.unwrap_or_default());
+    Ok(())
 }
 
 async fn migrate() -> Result<(), String> {

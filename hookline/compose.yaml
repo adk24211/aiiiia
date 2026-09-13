@@ -1,0 +1,19 @@
+services:
+  hookline:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      # The entire state of the service. Back this up and you have backed up
+      # everything.
+      - hookline-data:/data
+    environment:
+      HOOKLINE_LOG: info
+      # Everything else has a default that works. The two you are most likely
+      # to want:
+      # HOOKLINE_CONCURRENCY: 64
+      # HOOKLINE_MAX_ATTEMPTS: 12
+    restart: unless-stopped
+
+volumes:
+  hookline-data:
