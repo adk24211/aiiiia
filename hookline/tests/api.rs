@@ -394,3 +394,52 @@ async fn a_limit_is_honoured_on_every_listing() {
         );
     }
 }
+
+#[tokio::test]
+async fn the_admin_ui_is_served_and_locked_down() {
+    let hookline = Harness::start().await;
+    let response = hookline
+        .client
+        .get(&hookline.base)
+        .send()
+        .await
+        .expect("the admin UI should be served");
+    assert_eq!(response.status(), 200);
+    let policy = response
+        .headers()
+        .get("content-security-policy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // It loads nothing from anywhere else and posts nowhere, so say so.
+    assert!(policy.contains("default-src 'none'"), "{}", policy);
+    assert!(policy.contains("connect-src 'self'"), "{}", policy);
+
+    let body = response.text().await.expect("body");
+    assert!(body.contains("<title>hookline</title>"));
+    // One file, no build step, and nothing fetched from a CDN at runtime.
+    assert!(
+        !body.contains("http://"),
+        "the UI must not load anything over plaintext"
+    );
+    assert!(
+        !body.contains("<script src"),
+        "the UI must not depend on a script it does not ship"
+    );
+}
+
+#[tokio::test]
+async fn the_admin_ui_can_be_switched_off() {
+    let hookline = Harness::start_with(|mut c| {
+        c.admin_ui = false;
+        c
+    })
+    .await;
+    let response = hookline
+        .client
+        .get(&hookline.base)
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), 404);
+}

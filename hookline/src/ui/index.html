@@ -1,0 +1,470 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hookline</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #fff; --line: #e4e4e1; --ink: #1c1c1a;
+    --muted: #6b6b66; --accent: #1f5f4e; --bad: #9d2f26; --warn: #8a6a12;
+    --radius: 6px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --panel: #1d1e22; --line: #2e3036; --ink: #e8e8e6;
+      --muted: #9a9a94; --accent: #6bbfa4; --bad: #e0817a; --warn: #d6b45e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: .02em; }
+  header h1 span { color: var(--accent); }
+  .grow { flex: 1; }
+  input, select, button, textarea {
+    font: inherit; color: inherit; background: var(--bg);
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 9px;
+  }
+  textarea { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; width: 100%; }
+  button { background: var(--panel); cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.primary:hover { filter: brightness(1.08); }
+  button:disabled { opacity: .5; cursor: default; }
+  main { padding: 20px; max-width: 1180px; margin: 0 auto; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 14px 16px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .07em;
+             color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+  .stat b { display: block; font-size: 22px; font-weight: 600; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+       color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td { background: var(--bg); }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 11.5px;
+          border: 1px solid var(--line); }
+  .pill.ok { color: var(--accent); border-color: currentColor; }
+  .pill.bad { color: var(--bad); border-color: currentColor; }
+  .pill.warn { color: var(--warn); border-color: currentColor; }
+  .muted { color: var(--muted); }
+  .right { text-align: right; }
+  .empty { color: var(--muted); padding: 18px 8px; }
+  .error { color: var(--bad); }
+  .toast { position: fixed; right: 16px; bottom: 16px; background: var(--panel);
+           border: 1px solid var(--line); border-left: 3px solid var(--accent);
+           border-radius: var(--radius); padding: 10px 14px; max-width: 420px; }
+  .toast.bad { border-left-color: var(--bad); }
+  label { display: block; margin: 8px 0 3px; font-size: 12px; color: var(--muted); }
+  .field { flex: 1 1 200px; }
+  .wrap { word-break: break-all; }
+  dialog { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
+           color: var(--ink); max-width: 720px; width: 92%; padding: 18px; }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  nav a { color: var(--muted); text-decoration: none; margin-right: 14px; cursor: pointer; }
+  nav a.on { color: var(--ink); border-bottom: 2px solid var(--accent); padding-bottom: 3px; }
+</style>
+
+<header>
+  <h1>hook<span>line</span></h1>
+  <nav>
+    <a data-view="overview" class="on">Overview</a>
+    <a data-view="apps">Applications</a>
+  </nav>
+  <span class="grow"></span>
+  <input id="token" type="password" placeholder="API token" size="26" autocomplete="off">
+  <button id="save">Use</button>
+</header>
+
+<main>
+  <div id="view"></div>
+</main>
+
+<dialog id="modal"><div id="modal-body"></div></dialog>
+
+<script>
+"use strict";
+
+const $ = (s, root = document) => root.querySelector(s);
+const el = (tag, props = {}, ...kids) => {
+  const node = Object.assign(document.createElement(tag), props);
+  for (const kid of kids.flat()) if (kid != null) node.append(kid);
+  return node;
+};
+
+let token = localStorage.getItem("hookline.token") || "";
+$("#token").value = token;
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { authorization: "Bearer " + token } : {}),
+      ...(options.headers || {}),
+    },
+  });
+  const text = await response.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (!response.ok) {
+    throw new Error(body?.error?.message || response.status + " " + response.statusText);
+  }
+  return body;
+}
+
+function toast(message, bad = false) {
+  const node = el("div", { className: "toast" + (bad ? " bad" : ""), textContent: message });
+  document.body.append(node);
+  setTimeout(() => node.remove(), 4200);
+}
+
+const when = (ms) => {
+  if (!ms) return "—";
+  const delta = Date.now() - ms;
+  const scale = [[1000, "s"], [60, "m"], [60, "h"], [24, "d"]];
+  let value = Math.abs(delta), unit = "ms";
+  for (const [step, name] of scale) {
+    if (value < step) break;
+    value /= step; unit = name;
+  }
+  const rounded = unit === "ms" ? Math.round(value) : value.toFixed(value < 10 ? 1 : 0);
+  return delta >= 0 ? rounded + unit + " ago" : "in " + rounded + unit;
+};
+
+const statusPill = (s) => el("span", {
+  className: "pill " + ({ succeeded: "ok", success: "ok", failed: "bad", failure: "bad",
+                          cancelled: "warn", pending: "" })[s] ?? "",
+  textContent: s,
+});
+
+// ---------------------------------------------------------------- routing
+
+const views = {};
+let current = { name: "overview", args: [] };
+
+function show(name, ...args) {
+  current = { name, args };
+  for (const link of document.querySelectorAll("nav a")) {
+    link.classList.toggle("on", link.dataset.view === name);
+  }
+  render();
+}
+
+async function render() {
+  const root = $("#view");
+  if (!token) {
+    root.replaceChildren(el("div", { className: "card" },
+      el("h2", {}, "No token"),
+      el("p", { className: "muted" },
+        "Paste an API token above. Mint one on the server with "),
+      el("code", {}, "hookline key create admin-ui admin")));
+    return;
+  }
+  root.replaceChildren(el("div", { className: "empty" }, "Loading…"));
+  try {
+    const content = await views[current.name](...current.args);
+    root.replaceChildren(content);
+  } catch (e) {
+    root.replaceChildren(el("div", { className: "card error" }, String(e.message || e)));
+  }
+}
+
+for (const link of document.querySelectorAll("nav a")) {
+  link.onclick = () => show(link.dataset.view);
+}
+$("#save").onclick = () => {
+  token = $("#token").value.trim();
+  localStorage.setItem("hookline.token", token);
+  show("overview");
+};
+$("#token").onkeydown = (e) => { if (e.key === "Enter") $("#save").click(); };
+
+// ---------------------------------------------------------------- overview
+
+views.overview = async () => {
+  const stats = await api("/v1/stats");
+  const rate = stats.attempts_last_hour
+    ? Math.round(100 * stats.successes_last_hour / stats.attempts_last_hour) + "%"
+    : "—";
+  const stat = (value, label) => el("div", { className: "stat" },
+    el("b", {}, String(value)), el("span", {}, label));
+
+  return el("div", {},
+    el("div", { className: "card" },
+      el("h2", {}, "Queue"),
+      el("div", { className: "stats" },
+        stat(stats.queue.pending, "pending"),
+        stat(stats.queue.due, "due now"),
+        stat(stats.queue.in_flight, "in flight"),
+        stat(Math.round(stats.queue.oldest_due_age_ms / 1000) + "s", "oldest wait"),
+        stat(rate, "success, 1h"),
+        stat(stats.attempts_last_hour, "attempts, 1h"))),
+    el("div", { className: "card" },
+      el("h2", {}, "Fleet"),
+      el("div", { className: "stats" },
+        stat(stats.apps, "applications"),
+        stat(stats.endpoints, "endpoints"),
+        stat(stats.endpoints_disabled, "disabled"),
+        stat(stats.circuits_open, "circuits open"),
+        stat(Math.round(stats.uptime_ms / 60000) + "m", "uptime"))));
+};
+
+// ------------------------------------------------------------ applications
+
+views.apps = async () => {
+  const page = await api("/v1/apps?limit=100");
+  const rows = page.data.map((app) => el("tr", { className: "clickable",
+      onclick: () => show("app", app.id) },
+    el("td", {}, el("b", {}, app.name)),
+    el("td", { className: "mono muted wrap" }, app.id),
+    el("td", { className: "mono muted" }, app.uid || "—"),
+    el("td", { className: "muted right" }, when(app.created_at))));
+
+  const name = el("input", { placeholder: "name", size: 18 });
+  const uid = el("input", { placeholder: "your id (optional)", size: 18 });
+  const add = el("button", { className: "primary", textContent: "Create" });
+  add.onclick = async () => {
+    if (!name.value.trim()) return;
+    try {
+      await api("/v1/apps", { method: "POST", body: JSON.stringify({
+        name: name.value.trim(), uid: uid.value.trim() || null }) });
+      toast("created");
+      render();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  return el("div", {},
+    el("div", { className: "card" },
+      el("h2", {}, "New application"),
+      el("div", { className: "row" }, name, uid, add)),
+    el("div", { className: "card" },
+      el("h2", {}, "Applications"),
+      page.data.length
+        ? el("table", {}, el("thead", {}, el("tr", {},
+            el("th", {}, "Name"), el("th", {}, "Id"), el("th", {}, "Your id"),
+            el("th", { className: "right" }, "Created"))),
+            el("tbody", {}, rows))
+        : el("div", { className: "empty" }, "No applications yet.")));
+};
+
+views.app = async (appId) => {
+  const [app, endpoints] = await Promise.all([
+    api("/v1/apps/" + appId),
+    api("/v1/apps/" + appId + "/endpoints?limit=100"),
+  ]);
+
+  const rows = endpoints.data.map((ep) => el("tr", { className: "clickable",
+      onclick: () => show("endpoint", appId, ep.id) },
+    el("td", { className: "wrap" }, ep.url),
+    el("td", {}, (ep.event_types || ["all events"]).join(", ")),
+    el("td", {}, ep.disabled_at ? statusPill("disabled") : statusPill("active")),
+    el("td", { className: "muted right" }, when(ep.created_at))));
+
+  const url = el("input", { placeholder: "https://…", size: 34 });
+  const types = el("input", { placeholder: "invoice.*, user.created (optional)", size: 26 });
+  const add = el("button", { className: "primary", textContent: "Add endpoint" });
+  add.onclick = async () => {
+    const list = types.value.split(",").map((s) => s.trim()).filter(Boolean);
+    try {
+      const made = await api("/v1/apps/" + appId + "/endpoints", {
+        method: "POST",
+        body: JSON.stringify({ url: url.value.trim(),
+                               event_types: list.length ? list : null }),
+      });
+      showSecret(made.secret);
+      render();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  const send = el("button", { textContent: "Send a test event" });
+  send.onclick = () => testEvent(appId);
+
+  return el("div", {},
+    el("div", { className: "card" },
+      el("h2", {}, "Application"),
+      el("div", { className: "row" },
+        el("div", { className: "field" }, el("b", {}, app.name),
+          el("div", { className: "mono muted wrap" }, app.id)),
+        send)),
+    el("div", { className: "card" },
+      el("h2", {}, "New endpoint"),
+      el("div", { className: "row" }, url, types, add)),
+    el("div", { className: "card" },
+      el("h2", {}, "Endpoints"),
+      endpoints.data.length
+        ? el("table", {}, el("thead", {}, el("tr", {},
+            el("th", {}, "URL"), el("th", {}, "Events"), el("th", {}, "State"),
+            el("th", { className: "right" }, "Created"))),
+            el("tbody", {}, rows))
+        : el("div", { className: "empty" }, "No endpoints yet.")),
+    el("p", {}, el("a", { href: "#", onclick: () => show("apps"),
+                          className: "muted" }, "← all applications")));
+};
+
+// --------------------------------------------------------------- endpoint
+
+views.endpoint = async (appId, endpointId) => {
+  const base = "/v1/apps/" + appId + "/endpoints/" + endpointId;
+  const [endpoint, health, deliveries] = await Promise.all([
+    api(base), api(base + "/health"), api(base + "/deliveries?limit=50"),
+  ]);
+
+  const rows = deliveries.data.map((d) => {
+    const replay = el("button", { textContent: "Replay" });
+    replay.onclick = async (e) => {
+      e.stopPropagation();
+      try {
+        await api("/v1/apps/" + appId + "/deliveries/" + d.id + "/replay", { method: "POST" });
+        toast("queued again");
+        render();
+      } catch (err) { toast(err.message, true); }
+    };
+    return el("tr", { className: "clickable", onclick: () => showAttempts(appId, d.id) },
+      el("td", {}, statusPill(d.status)),
+      el("td", { className: "right" }, String(d.attempts)),
+      el("td", { className: "muted wrap" }, d.last_error || "—"),
+      el("td", { className: "muted right" }, when(d.created_at)),
+      el("td", { className: "right" }, replay));
+  });
+
+  const toggle = el("button", { textContent: endpoint.disabled_at ? "Enable" : "Disable" });
+  toggle.onclick = async () => {
+    try {
+      await api(base + (endpoint.disabled_at ? "/enable" : "/disable"), { method: "POST" });
+      render();
+    } catch (e) { toast(e.message, true); }
+  };
+  const rotate = el("button", { textContent: "Rotate secret" });
+  rotate.onclick = async () => {
+    try {
+      const made = await api(base + "/secrets/rotate", { method: "POST", body: "{}" });
+      showSecret(made.secret, "Both secrets sign until the old one expires.");
+    } catch (e) { toast(e.message, true); }
+  };
+  const replayAll = el("button", { textContent: "Replay failed" });
+  replayAll.onclick = async () => {
+    try {
+      const result = await api(base + "/replay", { method: "POST", body: "{}" });
+      toast("queued " + result.replayed + (result.more ? " (more remain)" : ""));
+      render();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  const circuit = health.circuit_open_until && health.circuit_open_until > Date.now()
+    ? el("span", { className: "pill bad" }, "circuit open, " + when(health.circuit_open_until))
+    : el("span", { className: "pill ok" }, "circuit closed");
+
+  return el("div", {},
+    el("div", { className: "card" },
+      el("h2", {}, "Endpoint"),
+      el("div", { className: "row" },
+        el("div", { className: "field" },
+          el("b", { className: "wrap" }, endpoint.url),
+          el("div", { className: "mono muted wrap" }, endpoint.id),
+          el("div", { className: "muted" },
+            (endpoint.event_types || ["all events"]).join(", "))),
+        el("div", { className: "field" },
+          circuit,
+          el("div", { className: "muted" },
+            health.consecutive_failures + " consecutive failures"),
+          endpoint.disabled_reason
+            ? el("div", { className: "error" }, endpoint.disabled_reason) : null),
+        el("div", {}, toggle, " ", rotate, " ", replayAll))),
+    el("div", { className: "card" },
+      el("h2", {}, "Recent deliveries"),
+      deliveries.data.length
+        ? el("table", {}, el("thead", {}, el("tr", {},
+            el("th", {}, "Status"), el("th", { className: "right" }, "Tries"),
+            el("th", {}, "Last error"), el("th", { className: "right" }, "Created"),
+            el("th", {}, ""))),
+            el("tbody", {}, rows))
+        : el("div", { className: "empty" }, "Nothing delivered here yet.")),
+    el("p", {}, el("a", { href: "#", onclick: () => show("app", appId),
+                          className: "muted" }, "← the application")));
+};
+
+// ----------------------------------------------------------------- modals
+
+function modal(...content) {
+  $("#modal-body").replaceChildren(...content,
+    el("p", {}, el("button", { textContent: "Close", onclick: () => $("#modal").close() })));
+  $("#modal").showModal();
+}
+
+function showSecret(secret, note) {
+  modal(
+    el("h2", {}, "Signing secret"),
+    el("p", { className: "muted" },
+      note || "Give this to the consumer. It is shown here and in the secrets route; " +
+              "requests are signed with it."),
+    el("p", { className: "mono wrap" }, secret));
+}
+
+async function showAttempts(appId, deliveryId) {
+  try {
+    const attempts = await api("/v1/apps/" + appId + "/deliveries/" + deliveryId + "/attempts");
+    modal(
+      el("h2", {}, "Attempts"),
+      el("p", { className: "mono muted wrap" }, deliveryId),
+      attempts.length
+        ? el("table", {}, el("thead", {}, el("tr", {},
+            el("th", {}, "#"), el("th", {}, "Result"), el("th", {}, "Code"),
+            el("th", {}, "Took"), el("th", {}, "Response"), el("th", {}, "When"))),
+            el("tbody", {}, attempts.map((a) => el("tr", {},
+              el("td", {}, String(a.attempt_no)),
+              el("td", {}, statusPill(a.status)),
+              el("td", {}, a.status_code == null ? "—" : String(a.status_code)),
+              el("td", {}, a.duration_ms + "ms"),
+              el("td", { className: "mono muted wrap" },
+                 a.error || a.response_snippet || "—"),
+              el("td", { className: "muted" }, when(a.created_at))))))
+        : el("div", { className: "empty" }, "No attempt has been made yet."));
+  } catch (e) { toast(e.message, true); }
+}
+
+function testEvent(appId) {
+  const type = el("input", { value: "test.event", size: 20 });
+  const payload = el("textarea", { rows: 6,
+    value: JSON.stringify({ hello: "world", sent_at: new Date().toISOString() }, null, 2) });
+  const go = el("button", { className: "primary", textContent: "Send" });
+  go.onclick = async () => {
+    let parsed;
+    try { parsed = JSON.parse(payload.value); }
+    catch { return toast("the payload is not valid JSON", true); }
+    try {
+      const sent = await api("/v1/apps/" + appId + "/messages", {
+        method: "POST",
+        body: JSON.stringify({ event_type: type.value.trim(), payload: parsed }),
+      });
+      $("#modal").close();
+      toast("queued to " + sent.deliveries.length + " endpoint(s)");
+      setTimeout(render, 600);
+    } catch (e) { toast(e.message, true); }
+  };
+  modal(
+    el("h2", {}, "Send a test event"),
+    el("label", {}, "Event type"), type,
+    el("label", {}, "Payload"), payload,
+    el("p", {}, go));
+}
+
+// Refresh the overview on its own, since it is the one that goes stale while
+// you watch it. Every other view changes only when you do something.
+setInterval(() => { if (current.name === "overview" && token) render(); }, 5000);
+show("overview");
+</script>

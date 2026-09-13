@@ -25,7 +25,7 @@ use crate::worker::Wake;
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::request::Parts;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
 use serde::Deserialize;
@@ -121,14 +121,45 @@ pub fn router(state: Api) -> Router {
             require_token,
         ));
 
-    Router::new()
+    let admin_ui = state.config.admin_ui;
+    let mut router = Router::new()
         // Unauthenticated on purpose: a health check that needs a credential
         // is a health check that a load balancer cannot make.
         .route("/health", get(system::health))
         .route("/version", get(system::version))
-        .nest("/v1", v1)
-        .fallback(not_found)
-        .with_state(state)
+        .nest("/v1", v1);
+
+    if admin_ui {
+        router = router.route("/", get(admin));
+    }
+
+    router.fallback(not_found).with_state(state)
+}
+
+/// The admin UI: one file, no build step, no third-party script.
+///
+/// Served unauthenticated because it contains nothing: it is markup and the
+/// code to call the same API a customer would, and every request it makes
+/// carries a token the person using it has to paste in. A login page here
+/// would be a second authentication scheme to get wrong.
+async fn admin() -> axum::response::Response {
+    use axum::http::header;
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            // It talks to its own origin and loads nothing from anywhere else,
+            // so say so: a stored payload that reaches this page cannot then
+            // reach out.
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
+                 connect-src 'self'; form-action 'none'; base-uri 'none'",
+            ),
+            (header::X_FRAME_OPTIONS, "DENY"),
+        ],
+        include_str!("../ui/index.html"),
+    )
+        .into_response()
 }
 
 /// Reject anything without a valid token before it reaches a handler.
