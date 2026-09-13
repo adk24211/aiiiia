@@ -11,6 +11,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod api;
+pub mod auth;
 pub mod backoff;
 pub mod breaker;
 pub mod config;
@@ -21,6 +23,7 @@ pub mod ids;
 pub mod models;
 pub mod queue;
 pub mod sender;
+pub mod server;
 pub mod sign;
 pub mod store;
 pub mod worker;
