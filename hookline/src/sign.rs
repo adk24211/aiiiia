@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn a_signature_verifies() {
         let secret = new_secret();
-        let header = sign(&[secret.clone()], ID, NOW, b"{\"hello\":1}");
+        let header = sign(std::slice::from_ref(&secret), ID, NOW, b"{\"hello\":1}");
         assert!(header.starts_with("v1,"));
         verify(&secret, &header, ID, NOW, b"{\"hello\":1}", NOW, 300).expect("should verify");
     }
@@ -162,7 +162,7 @@ mod tests {
     fn every_part_of_the_request_is_covered() {
         let secret = new_secret();
         let body = b"{\"amount\":100}";
-        let header = sign(&[secret.clone()], ID, NOW, body);
+        let header = sign(std::slice::from_ref(&secret), ID, NOW, body);
 
         // A different body, id or timestamp must not verify: all three are
         // inside the signed string.
@@ -171,7 +171,15 @@ mod tests {
             Err(VerifyError::Signature)
         );
         assert_eq!(
-            verify(&secret, &header, "msg_0000000000000000000000000", NOW, body, NOW, 300),
+            verify(
+                &secret,
+                &header,
+                "msg_0000000000000000000000000",
+                NOW,
+                body,
+                NOW,
+                300
+            ),
             Err(VerifyError::Signature)
         );
         assert_eq!(
@@ -188,7 +196,7 @@ mod tests {
     #[test]
     fn a_stale_timestamp_is_rejected_before_the_signature_is_checked() {
         let secret = new_secret();
-        let header = sign(&[secret.clone()], ID, NOW, b"{}");
+        let header = sign(std::slice::from_ref(&secret), ID, NOW, b"{}");
         assert_eq!(
             verify(&secret, &header, ID, NOW, b"{}", NOW + 301, 300),
             Err(VerifyError::Timestamp)

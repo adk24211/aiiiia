@@ -174,8 +174,8 @@ mod tests {
         let db = Db::in_memory().expect("open");
         let tables: Vec<String> = db
             .call(|conn| {
-                let mut stmt =
-                    conn.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
+                let mut stmt = conn
+                    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
                 let rows = stmt
                     .query_map([], |r| r.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -194,7 +194,11 @@ mod tests {
             "messages",
             "schema_migrations",
         ] {
-            assert!(tables.contains(&expected.to_string()), "missing {}", expected);
+            assert!(
+                tables.contains(&expected.to_string()),
+                "missing {}",
+                expected
+            );
         }
     }
 
@@ -204,7 +208,10 @@ mod tests {
         let path = dir.join("hookline.db");
         let db = Db::open(&path, 2).expect("open");
         db.call(|c| {
-            c.execute("INSERT INTO apps(id, name, created_at) VALUES ('app_x', 'n', 1)", [])?;
+            c.execute(
+                "INSERT INTO apps(id, name, created_at) VALUES ('app_x', 'n', 1)",
+                [],
+            )?;
             Ok(())
         })
         .await
@@ -233,7 +240,10 @@ mod tests {
         let dir = tempdir();
         let db = Db::open(dir.join("pool.db"), 2).expect("open");
         db.call(|c| {
-            c.execute("INSERT INTO apps(id, name, created_at) VALUES ('app_x', 'n', 1)", [])?;
+            c.execute(
+                "INSERT INTO apps(id, name, created_at) VALUES ('app_x', 'n', 1)",
+                [],
+            )?;
             Ok(())
         })
         .await
@@ -242,7 +252,10 @@ mod tests {
         for _ in 0..8 {
             let bad = db
                 .call(|c| {
-                    c.execute("INSERT INTO apps(id, name, created_at) VALUES ('app_x', 'n', 1)", [])?;
+                    c.execute(
+                        "INSERT INTO apps(id, name, created_at) VALUES ('app_x', 'n', 1)",
+                        [],
+                    )?;
                     Ok(())
                 })
                 .await;

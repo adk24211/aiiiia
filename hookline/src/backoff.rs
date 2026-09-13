@@ -121,7 +121,11 @@ mod tests {
         };
         assert!(s.delay(1).is_some());
         assert!(s.delay(2).is_some());
-        assert_eq!(s.delay(3), None, "a schedule of three has no fourth attempt");
+        assert_eq!(
+            s.delay(3),
+            None,
+            "a schedule of three has no fourth attempt"
+        );
         assert_eq!(s.delay(99), None);
     }
 

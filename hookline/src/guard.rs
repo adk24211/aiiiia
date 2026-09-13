@@ -23,7 +23,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use url::Url;
 
 /// What a deployment is willing to send to.
-#[derive(Clone, Debug)]
+///
+/// The default refuses everything worth refusing: plaintext HTTP, and any
+/// address that is not on the public internet.
+#[derive(Clone, Debug, Default)]
 pub struct Policy {
     /// Allow plain `http://`. Off by default: a webhook carries a signature
     /// over a payload that is often not meant to be public.
@@ -39,17 +42,6 @@ pub struct Policy {
     /// Hostnames that are always refused, matched on the host and any parent
     /// domain, so `evil.example.com` is caught by `example.com`.
     pub denied_hosts: Vec<String>,
-}
-
-impl Default for Policy {
-    fn default() -> Policy {
-        Policy {
-            allow_http: false,
-            allow_private: false,
-            allowed_ports: Vec::new(),
-            denied_hosts: Vec::new(),
-        }
-    }
 }
 
 impl Policy {
@@ -75,7 +67,11 @@ pub enum Rejected {
     DeniedHost(String),
     /// The host resolved to an address that is not routable on the public
     /// internet.
-    PrivateAddress { host: String, addr: IpAddr, why: &'static str },
+    PrivateAddress {
+        host: String,
+        addr: IpAddr,
+        why: &'static str,
+    },
     Unresolvable(String),
 }
 
@@ -155,7 +151,11 @@ pub fn check_url(raw: &str, policy: &Policy) -> Result<Url, Rejected> {
     if let Ok(ip) = lowered.trim_matches(['[', ']']).parse::<IpAddr>() {
         if !policy.allow_private {
             if let Some(why) = forbidden(ip) {
-                return Err(Rejected::PrivateAddress { host, addr: ip, why });
+                return Err(Rejected::PrivateAddress {
+                    host,
+                    addr: ip,
+                    why,
+                });
             }
         }
     }
@@ -264,13 +264,14 @@ fn forbidden_v6(ip: Ipv6Addr) -> Option<&'static str> {
 /// mapping visible next to the reason it matters.
 fn to_ipv4_mapped(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     let s = ip.segments();
-    (s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0xffff)
-        .then(|| Ipv4Addr::new(
+    (s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0xffff).then(|| {
+        Ipv4Addr::new(
             (s[6] >> 8) as u8,
             (s[6] & 0xff) as u8,
             (s[7] >> 8) as u8,
             (s[7] & 0xff) as u8,
-        ))
+        )
+    })
 }
 
 #[cfg(test)]
@@ -288,9 +289,24 @@ mod tests {
             check_url("http://example.com/hook", &strict()),
             Err(Rejected::Scheme(_))
         ));
-        assert!(check_url("http://example.com/hook", &Policy { allow_http: true, ..strict() }).is_ok());
-        for bad in ["file:///etc/passwd", "gopher://example.com", "ftp://example.com"] {
-            assert!(matches!(check_url(bad, &strict()), Err(Rejected::Scheme(_))), "{}", bad);
+        assert!(check_url(
+            "http://example.com/hook",
+            &Policy {
+                allow_http: true,
+                ..strict()
+            }
+        )
+        .is_ok());
+        for bad in [
+            "file:///etc/passwd",
+            "gopher://example.com",
+            "ftp://example.com",
+        ] {
+            assert!(
+                matches!(check_url(bad, &strict()), Err(Rejected::Scheme(_))),
+                "{}",
+                bad
+            );
         }
     }
 
@@ -317,13 +333,28 @@ mod tests {
     #[test]
     fn private_and_loopback_literals_are_refused() {
         for host in [
-            "127.0.0.1", "127.1.2.3", "10.0.0.1", "192.168.1.1", "172.16.0.1", "172.31.255.255",
-            "0.0.0.0", "169.254.1.1", "100.64.0.1", "192.0.0.1", "198.18.0.1", "224.0.0.1",
-            "240.0.0.1", "255.255.255.255", "192.0.2.1",
+            "127.0.0.1",
+            "127.1.2.3",
+            "10.0.0.1",
+            "192.168.1.1",
+            "172.16.0.1",
+            "172.31.255.255",
+            "0.0.0.0",
+            "169.254.1.1",
+            "100.64.0.1",
+            "192.0.0.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "240.0.0.1",
+            "255.255.255.255",
+            "192.0.2.1",
         ] {
             let url = format!("https://{}/hook", host);
             assert!(
-                matches!(check_url(&url, &strict()), Err(Rejected::PrivateAddress { .. })),
+                matches!(
+                    check_url(&url, &strict()),
+                    Err(Rejected::PrivateAddress { .. })
+                ),
                 "{} was allowed",
                 host
             );
@@ -348,7 +379,10 @@ mod tests {
         ] {
             let url = format!("https://{}/hook", host);
             assert!(
-                matches!(check_url(&url, &strict()), Err(Rejected::PrivateAddress { .. })),
+                matches!(
+                    check_url(&url, &strict()),
+                    Err(Rejected::PrivateAddress { .. })
+                ),
                 "{} was allowed",
                 host
             );
@@ -357,7 +391,13 @@ mod tests {
 
     #[test]
     fn ordinary_public_addresses_are_allowed() {
-        for host in ["1.1.1.1", "8.8.8.8", "93.184.216.34", "[2606:4700::1111]", "example.com"] {
+        for host in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "93.184.216.34",
+            "[2606:4700::1111]",
+            "example.com",
+        ] {
             let url = format!("https://{}/hook", host);
             assert!(check_url(&url, &strict()).is_ok(), "{} was refused", host);
         }

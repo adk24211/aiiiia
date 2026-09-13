@@ -1,1 +1,3 @@
-fn main() { println!("hookline"); }
+fn main() {
+    println!("hookline");
+}

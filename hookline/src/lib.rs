@@ -16,7 +16,9 @@ pub mod db;
 pub mod error;
 pub mod guard;
 pub mod ids;
+pub mod models;
 pub mod sign;
+pub mod store;
 
 /// Milliseconds since the Unix epoch.
 ///
