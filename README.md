@@ -586,6 +586,14 @@ spirit to [Herbie](https://herbie.uwplse.org).
 no macros beyond one convenience, and every non-obvious decision explained
 where it is made.
 
+## Also in this repository
+
+[`hookline/`](hookline/) is a separate project: reliable webhook delivery as a
+single self-hosted binary — a durable queue, retries with jitter, Standard
+Webhooks signatures with rotation, a circuit breaker, replay, an audit trail
+and SSRF defence. It is its own crate with its own dependencies and its own
+tests; nothing here depends on it and it depends on nothing here.
+
 ## License
 
 MIT.

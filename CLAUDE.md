@@ -3,6 +3,10 @@
 An equality saturation engine for a small numeric language. `docs/design.md`
 explains how it works and why; read it before changing the core.
 
+Everything below is about saturn: the crate at the repository root. The
+separate project in `hookline/` is a network service with its own crate,
+dependencies, tests and conventions — see `hookline/CLAUDE.md`.
+
 ## Ground rules
 
 **Zero dependencies.** The crate builds on `std` alone, and it stays that way.
