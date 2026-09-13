@@ -298,6 +298,9 @@ pub struct Health {
     pub last_success_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_failure_at: Option<i64>,
+    /// When a rate-limited endpoint may be sent to again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_allowed_at: Option<i64>,
 }
 
 impl Health {
@@ -308,6 +311,7 @@ impl Health {
             circuit_open_until: row.get("circuit_open_until")?,
             last_success_at: row.get("last_success_at")?,
             last_failure_at: row.get("last_failure_at")?,
+            next_allowed_at: row.get("next_allowed_at")?,
         })
     }
 }

@@ -79,6 +79,24 @@ explicit replay closes the circuit, because the breaker's state is an
 inference from past attempts and a replay is someone telling us the thing
 those attempts failed against has been fixed — which cannot be inferred.
 
+## Rate limits are spacing, not a bucket
+
+An endpoint may cap how many deliveries a minute it will take. That is
+enforced with one timestamp per endpoint: claiming a delivery moves the
+endpoint's next allowed time forward by a minute divided by the limit. At six
+a minute, one every ten seconds.
+
+A token bucket would be the usual answer and is the wrong one here. A bucket
+that has filled while an endpoint was quiet empties in one burst the moment
+work arrives, which is exactly what an endpoint asking for a rate limit is
+trying to avoid. Spacing has no burst to absorb, costs no counting, and makes
+the rate exact rather than approximate.
+
+Rate-limited endpoints are claimed in a second pass, separate from everyone
+else's. That is not tidiness: a limited endpoint with ten thousand queued
+deliveries would otherwise sit at the front of the queue, and every claim
+would spend its budget looking at deliveries it is not allowed to take.
+
 ## Which failures are worth retrying
 
 A 4xx is the endpoint saying the request is wrong. Sending the identical bytes

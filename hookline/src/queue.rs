@@ -38,37 +38,41 @@ pub struct Job {
     pub secrets: Vec<String>,
 }
 
+/// The period a per-endpoint rate limit is expressed over: `rate_limit`
+/// deliveries per minute.
+pub const RATE_PERIOD: i64 = 60_000;
+
 /// Claim up to `limit` deliveries that are due, leasing them until
 /// `now + lease_millis`.
 ///
-/// Deliveries to an endpoint whose circuit is open are passed over rather than
-/// claimed, so an endpoint that is down cannot occupy every worker.
+/// Two passes, because rate-limited endpoints need different handling and
+/// mixing them would make the common case pay for the rare one.
+///
+/// The first pass is the one almost every delivery goes through: a single
+/// statement over the partial index on due deliveries. The select, the update
+/// and what it returns are one write, and SQLite serialises writers, so two
+/// workers cannot claim the same delivery.
+///
+/// The second pass takes at most one delivery from each rate-limited endpoint
+/// that is allowed another, and moves that endpoint's next allowed time
+/// forward by the spacing its limit implies. Keeping it out of the first pass
+/// is what stops a rate-limited endpoint with a large backlog from sitting at
+/// the front of the queue and starving everyone else.
 pub fn claim(
     conn: &Transaction<'_>,
     now: i64,
     lease_millis: i64,
     limit: usize,
 ) -> Result<Vec<Job>> {
-    let mut stmt = conn.prepare(
-        "UPDATE deliveries SET lease_until = ?1 + ?2, updated_at = ?1
-         WHERE id IN (
-             SELECT d.id FROM deliveries d
-             WHERE d.status = 'pending'
-               AND d.next_at <= ?1
-               AND (d.lease_until IS NULL OR d.lease_until <= ?1)
-               AND NOT EXISTS (
-                   SELECT 1 FROM endpoint_health h
-                   WHERE h.endpoint_id = d.endpoint_id AND h.circuit_open_until > ?1
-               )
-             ORDER BY d.next_at, d.id
-             LIMIT ?3
-         )
-         RETURNING *",
-    )?;
-    let claimed = stmt
-        .query_map(params![now, lease_millis, limit as i64], Delivery::from_row)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(stmt);
+    let mut claimed = claim_unlimited(conn, now, lease_millis, limit)?;
+    if claimed.len() < limit {
+        claimed.extend(claim_limited(
+            conn,
+            now,
+            lease_millis,
+            limit - claimed.len(),
+        )?);
+    }
 
     let mut jobs = Vec::with_capacity(claimed.len());
     for delivery in claimed {
@@ -83,6 +87,100 @@ pub fn claim(
         });
     }
     Ok(jobs)
+}
+
+/// The common path: endpoints with no limit of their own.
+fn claim_unlimited(
+    conn: &Transaction<'_>,
+    now: i64,
+    lease_millis: i64,
+    limit: usize,
+) -> Result<Vec<Delivery>> {
+    let mut stmt = conn.prepare(
+        "UPDATE deliveries SET lease_until = ?1 + ?2, updated_at = ?1
+         WHERE id IN (
+             SELECT d.id FROM deliveries d
+             JOIN endpoints e ON e.id = d.endpoint_id
+             WHERE d.status = 'pending'
+               AND d.next_at <= ?1
+               AND (d.lease_until IS NULL OR d.lease_until <= ?1)
+               AND e.rate_limit IS NULL
+               AND e.disabled_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM endpoint_health h
+                   WHERE h.endpoint_id = d.endpoint_id AND h.circuit_open_until > ?1
+               )
+             ORDER BY d.next_at, d.id
+             LIMIT ?3
+         )
+         RETURNING *",
+    )?;
+    let rows = stmt
+        .query_map(params![now, lease_millis, limit as i64], Delivery::from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// One delivery per rate-limited endpoint that is due another.
+fn claim_limited(
+    conn: &Transaction<'_>,
+    now: i64,
+    lease_millis: i64,
+    limit: usize,
+) -> Result<Vec<Delivery>> {
+    let ready: Vec<(String, i64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.rate_limit FROM endpoints e
+             LEFT JOIN endpoint_health h ON h.endpoint_id = e.id
+             WHERE e.rate_limit IS NOT NULL
+               AND e.rate_limit > 0
+               AND e.disabled_at IS NULL
+               AND (h.circuit_open_until IS NULL OR h.circuit_open_until <= ?1)
+               AND (h.next_allowed_at IS NULL OR h.next_allowed_at <= ?1)
+             LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![now, limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+
+    let mut claimed = Vec::new();
+    for (endpoint_id, rate_limit) in ready {
+        let mut stmt = conn.prepare_cached(
+            "UPDATE deliveries SET lease_until = ?1 + ?2, updated_at = ?1
+             WHERE id = (
+                 SELECT id FROM deliveries
+                 WHERE endpoint_id = ?3
+                   AND status = 'pending'
+                   AND next_at <= ?1
+                   AND (lease_until IS NULL OR lease_until <= ?1)
+                 ORDER BY next_at, id
+                 LIMIT 1
+             )
+             RETURNING *",
+        )?;
+        let taken = stmt
+            .query_map(params![now, lease_millis, endpoint_id], Delivery::from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        if taken.is_empty() {
+            continue;
+        }
+        // Spacing rather than a bucket: at `rate_limit` per minute the next
+        // one is allowed a minute divided by the limit from now, which makes
+        // the rate exact and leaves no burst to absorb.
+        let spacing = (RATE_PERIOD / rate_limit.max(1)).max(1);
+        conn.execute(
+            "INSERT INTO endpoint_health(endpoint_id, next_allowed_at) VALUES (?1, ?2)
+             ON CONFLICT(endpoint_id) DO UPDATE SET next_allowed_at = ?2",
+            params![endpoint_id, now + spacing],
+        )?;
+        claimed.extend(taken);
+    }
+    Ok(claimed)
 }
 
 /// How an attempt turned out, from the queue's point of view.

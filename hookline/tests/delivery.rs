@@ -485,3 +485,42 @@ async fn wait_for_status(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+#[tokio::test]
+async fn a_rate_limited_endpoint_is_fed_slowly_and_still_fed() {
+    let consumer = Consumer::start().await;
+    let hookline = Harness::start().await;
+    let (_, app) = hookline
+        .post("/v1/apps", serde_json::json!({ "name": "acme" }))
+        .await;
+    let app = app["id"].as_str().unwrap().to_string();
+    // 600 a minute is one every 100ms, which is slow enough to observe and
+    // fast enough to finish inside a test.
+    hookline
+        .post(
+            &format!("/v1/apps/{}/endpoints", app),
+            serde_json::json!({ "url": consumer.url(), "rate_limit": 600 }),
+        )
+        .await;
+
+    for i in 0..6 {
+        hookline
+            .post(
+                &format!("/v1/apps/{}/messages", app),
+                serde_json::json!({ "event_type": "x", "payload": { "i": i } }),
+            )
+            .await;
+    }
+
+    // Without a limit all six would be in flight within a poll interval.
+    consumer.wait_for(1, PATIENCE).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        consumer.count() < 6,
+        "the limit did not slow anything down: {} arrived at once",
+        consumer.count()
+    );
+
+    // And it is a limit, not a cap: everything arrives in the end.
+    consumer.wait_for(6, PATIENCE).await;
+}

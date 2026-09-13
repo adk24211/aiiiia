@@ -95,13 +95,19 @@ CREATE INDEX attempts_by_delivery ON attempts(delivery_id, attempt_no);
 CREATE INDEX attempts_by_endpoint ON attempts(endpoint_id, id);
 CREATE INDEX attempts_by_app ON attempts(app_id, id);
 
--- Enough state to run a circuit breaker without scanning the attempt log.
+-- Enough state to run a circuit breaker and a rate limiter without scanning
+-- the attempt log for either.
 CREATE TABLE endpoint_health (
     endpoint_id          TEXT NOT NULL PRIMARY KEY REFERENCES endpoints(id) ON DELETE CASCADE,
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
     circuit_open_until   INTEGER,
     last_success_at      INTEGER,
-    last_failure_at      INTEGER
+    last_failure_at      INTEGER,
+    -- A rate-limited endpoint may be sent to again at this time. One
+    -- timestamp is the whole limiter: claiming a delivery moves it forward by
+    -- the spacing the limit implies, so the rate is exact and enforcing it
+    -- costs no counting.
+    next_allowed_at      INTEGER
 );
 
 -- API credentials. Only the hash is stored; the token is shown once.

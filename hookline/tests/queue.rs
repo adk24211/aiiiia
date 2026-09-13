@@ -405,3 +405,194 @@ async fn depth_reports_what_is_waiting() {
     .await
     .expect("queue");
 }
+
+#[tokio::test]
+async fn a_rate_limit_spaces_deliveries_out() {
+    let db = Db::in_memory().expect("open");
+    db.call(|conn| {
+        let app = store::apps::create(conn, "acme", None, &serde_json::json!({}), NOW)?;
+        let tx = conn.transaction()?;
+        // Four a minute: one every fifteen seconds.
+        let (endpoint, _) = store::endpoints::create(
+            &tx,
+            &app.id,
+            "https://example.com/hook",
+            "",
+            None,
+            Some(4),
+            &sign::new_secret(),
+            NOW,
+        )?;
+        tx.commit()?;
+        for i in 0..20 {
+            let tx = conn.transaction()?;
+            store::messages::create(&tx, &app.id, "x", &serde_json::json!({ "i": i }), None, NOW)?;
+            tx.commit()?;
+        }
+
+        let spacing = queue::RATE_PERIOD / 4;
+
+        // However many a worker asks for, it gets one.
+        let tx = conn.transaction()?;
+        let first = queue::claim(&tx, NOW, queue::DEFAULT_LEASE, 100)?;
+        tx.commit()?;
+        assert_eq!(
+            first.len(),
+            1,
+            "a limited endpoint gives up one delivery at a time"
+        );
+
+        let tx = conn.transaction()?;
+        let early = queue::claim(&tx, NOW + spacing - 1, queue::DEFAULT_LEASE, 100)?;
+        tx.commit()?;
+        assert!(early.is_empty(), "nothing before the spacing has elapsed");
+
+        let tx = conn.transaction()?;
+        let next = queue::claim(&tx, NOW + spacing, queue::DEFAULT_LEASE, 100)?;
+        tx.commit()?;
+        assert_eq!(next.len(), 1, "and one when it has");
+
+        // Over a minute, no more than the limit. Walk a minute in small steps
+        // and count what comes out.
+        let mut delivered = 0;
+        let mut at = NOW + spacing;
+        for _ in 0..600 {
+            at += 100;
+            let tx = conn.transaction()?;
+            delivered += queue::claim(&tx, at, queue::DEFAULT_LEASE, 100)?.len();
+            tx.commit()?;
+        }
+        assert!(
+            delivered <= 4,
+            "{} deliveries went out in a minute against a limit of 4",
+            delivered
+        );
+        assert!(
+            delivered >= 3,
+            "the limit should not throttle below itself: {}",
+            delivered
+        );
+        let _ = endpoint;
+        Ok(())
+    })
+    .await
+    .expect("queue");
+}
+
+#[tokio::test]
+async fn a_rate_limit_reports_when_the_next_one_may_go() {
+    let db = Db::in_memory().expect("open");
+    db.call(|conn| {
+        let app = store::apps::create(conn, "acme", None, &serde_json::json!({}), NOW)?;
+        let tx = conn.transaction()?;
+        let (endpoint, _) = store::endpoints::create(
+            &tx,
+            &app.id,
+            "https://example.com/hook",
+            "",
+            None,
+            Some(6),
+            &sign::new_secret(),
+            NOW,
+        )?;
+        tx.commit()?;
+        let tx = conn.transaction()?;
+        store::messages::create(&tx, &app.id, "x", &serde_json::json!({}), None, NOW)?;
+        tx.commit()?;
+
+        assert!(store::health::get(conn, &endpoint.id)?
+            .next_allowed_at
+            .is_none());
+        let tx = conn.transaction()?;
+        queue::claim(&tx, NOW, queue::DEFAULT_LEASE, 10)?;
+        tx.commit()?;
+        assert_eq!(
+            store::health::get(conn, &endpoint.id)?.next_allowed_at,
+            Some(NOW + queue::RATE_PERIOD / 6)
+        );
+        Ok(())
+    })
+    .await
+    .expect("queue");
+}
+
+#[tokio::test]
+async fn one_rate_limited_endpoint_does_not_hold_up_another() {
+    let db = Db::in_memory().expect("open");
+    db.call(|conn| {
+        let app = store::apps::create(conn, "acme", None, &serde_json::json!({}), NOW)?;
+        let tx = conn.transaction()?;
+        let (slow, _) = store::endpoints::create(
+            &tx,
+            &app.id,
+            "https://slow.example/hook",
+            "",
+            Some(&["slow".to_string()]),
+            Some(1),
+            &sign::new_secret(),
+            NOW,
+        )?;
+        let (fast, _) = store::endpoints::create(
+            &tx,
+            &app.id,
+            "https://fast.example/hook",
+            "",
+            Some(&["fast".to_string()]),
+            None,
+            &sign::new_secret(),
+            NOW,
+        )?;
+        tx.commit()?;
+        for i in 0..5 {
+            for event in ["slow", "fast"] {
+                let tx = conn.transaction()?;
+                store::messages::create(
+                    &tx,
+                    &app.id,
+                    event,
+                    &serde_json::json!({ "i": i }),
+                    None,
+                    NOW,
+                )?;
+                tx.commit()?;
+            }
+        }
+
+        let tx = conn.transaction()?;
+        let claimed = queue::claim(&tx, NOW, queue::DEFAULT_LEASE, 100)?;
+        tx.commit()?;
+
+        let to_slow = claimed.iter().filter(|j| j.endpoint.id == slow.id).count();
+        let to_fast = claimed.iter().filter(|j| j.endpoint.id == fast.id).count();
+        assert_eq!(to_slow, 1, "the limited endpoint is held to its limit");
+        assert_eq!(to_fast, 5, "the unlimited one is not held up by it");
+        Ok(())
+    })
+    .await
+    .expect("queue");
+}
+
+#[tokio::test]
+async fn a_disabled_endpoint_is_never_claimed() {
+    // Disabling cancels what is queued, so this is about the race: a delivery
+    // queued in the moment between the check and the disable.
+    let db = Db::in_memory().expect("open");
+    db.call(|conn| {
+        let (app_id, endpoint_id) = seed(conn, 3)?;
+        conn.execute(
+            "UPDATE endpoints SET disabled_at = ?2 WHERE id = ?1",
+            rusqlite::params![endpoint_id, NOW],
+        )?;
+        let tx = conn.transaction()?;
+        let claimed = queue::claim(&tx, NOW, queue::DEFAULT_LEASE, 10)?;
+        tx.commit()?;
+        assert!(
+            claimed.is_empty(),
+            "a disabled endpoint must not be delivered to"
+        );
+        let _ = app_id;
+        Ok(())
+    })
+    .await
+    .expect("queue");
+}
