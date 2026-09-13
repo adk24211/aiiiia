@@ -12,11 +12,13 @@
 #![forbid(unsafe_code)]
 
 pub mod backoff;
+pub mod breaker;
 pub mod db;
 pub mod error;
 pub mod guard;
 pub mod ids;
 pub mod models;
+pub mod queue;
 pub mod sign;
 pub mod store;
 

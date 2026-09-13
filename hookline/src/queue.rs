@@ -1,0 +1,279 @@
+//! The queue: handing work to a worker and taking the result back.
+//!
+//! A worker claims a batch of due deliveries by writing a lease on them. The
+//! lease is what makes a crash safe: a worker that dies mid-request leaves
+//! rows whose lease simply expires, and the next claim picks them up. Nothing
+//! has to notice the worker died, and no delivery is lost because the process
+//! that owned it went away.
+//!
+//! The claim is a single statement. `SELECT` the due rows, `UPDATE` them and
+//! `RETURNING` what was taken all happen inside one write, and SQLite
+//! serialises writers, so two workers cannot claim the same delivery even
+//! when they ask at the same instant.
+
+use crate::breaker;
+use crate::error::Result;
+use crate::models::{Delivery, Endpoint, Message};
+use crate::store;
+use rusqlite::{params, Connection, Transaction};
+
+/// How long a claimed delivery stays claimed.
+///
+/// Long enough to cover the request timeout with room to spare, because a
+/// lease that expires while the request is still in flight means the same
+/// webhook is sent twice.
+pub const DEFAULT_LEASE: i64 = 60_000;
+
+/// Everything a worker needs to send one webhook, read in one go.
+///
+/// The secrets travel with it because signing happens on the worker thread,
+/// after the database connection has been given back: holding a connection
+/// across an HTTP request would tie up the pool for the length of the slowest
+/// endpoint any customer has.
+#[derive(Debug, Clone)]
+pub struct Job {
+    pub delivery: Delivery,
+    pub endpoint: Endpoint,
+    pub message: Message,
+    pub secrets: Vec<String>,
+}
+
+/// Claim up to `limit` deliveries that are due, leasing them until
+/// `now + lease_millis`.
+///
+/// Deliveries to an endpoint whose circuit is open are passed over rather than
+/// claimed, so an endpoint that is down cannot occupy every worker.
+pub fn claim(
+    conn: &Transaction<'_>,
+    now: i64,
+    lease_millis: i64,
+    limit: usize,
+) -> Result<Vec<Job>> {
+    let mut stmt = conn.prepare(
+        "UPDATE deliveries SET lease_until = ?1 + ?2, updated_at = ?1
+         WHERE id IN (
+             SELECT d.id FROM deliveries d
+             WHERE d.status = 'pending'
+               AND d.next_at <= ?1
+               AND (d.lease_until IS NULL OR d.lease_until <= ?1)
+               AND NOT EXISTS (
+                   SELECT 1 FROM endpoint_health h
+                   WHERE h.endpoint_id = d.endpoint_id AND h.circuit_open_until > ?1
+               )
+             ORDER BY d.next_at, d.id
+             LIMIT ?3
+         )
+         RETURNING *",
+    )?;
+    let claimed = stmt
+        .query_map(params![now, lease_millis, limit as i64], Delivery::from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let mut jobs = Vec::with_capacity(claimed.len());
+    for delivery in claimed {
+        let endpoint = store::endpoints::get(conn, &delivery.app_id, &delivery.endpoint_id)?;
+        let message = store::messages::get(conn, &delivery.app_id, &delivery.message_id)?;
+        let secrets = store::secrets::active(conn, &delivery.endpoint_id, now)?;
+        jobs.push(Job {
+            delivery,
+            endpoint,
+            message,
+            secrets,
+        });
+    }
+    Ok(jobs)
+}
+
+/// How an attempt turned out, from the queue's point of view.
+#[derive(Debug, Clone)]
+pub struct Outcome {
+    pub succeeded: bool,
+    pub status_code: Option<u16>,
+    pub error: Option<String>,
+    pub duration_ms: i64,
+    pub response_snippet: Option<String>,
+}
+
+/// What happened to the delivery as a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settled {
+    Succeeded,
+    /// Another attempt is due at this time.
+    Retrying {
+        next_at: i64,
+    },
+    /// Out of attempts.
+    Failed,
+    /// Out of attempts, and the endpoint was switched off as well.
+    FailedAndDisabled,
+}
+
+/// Record an attempt and move the delivery on.
+///
+/// `retry_at` is `None` when the schedule is exhausted. Everything here is one
+/// transaction: the attempt row, the delivery's new state and the endpoint's
+/// health have to agree, and a crash between them would leave a delivery that
+/// is leased forever or a breaker counting failures that are not recorded.
+pub fn settle(
+    tx: &Transaction<'_>,
+    job: &Job,
+    outcome: &Outcome,
+    retry_at: Option<i64>,
+    policy: &breaker::Policy,
+    now: i64,
+) -> Result<Settled> {
+    let attempt_no = job.delivery.attempts + 1;
+    store::attempts::record(
+        tx,
+        &job.delivery,
+        attempt_no,
+        if outcome.succeeded {
+            "success"
+        } else {
+            "failure"
+        },
+        outcome.status_code,
+        outcome.error.as_deref(),
+        outcome.duration_ms,
+        outcome.response_snippet.as_deref(),
+        now,
+    )?;
+
+    if outcome.succeeded {
+        tx.execute(
+            "UPDATE deliveries SET status = 'succeeded', attempts = ?2, lease_until = NULL,
+                                   last_error = NULL, updated_at = ?3
+             WHERE id = ?1",
+            params![job.delivery.id, attempt_no, now],
+        )?;
+        store::health::record_success(tx, &job.endpoint.id, now)?;
+        return Ok(Settled::Succeeded);
+    }
+
+    let consecutive = store::health::record_failure(tx, &job.endpoint.id, now)?;
+    let action = policy.on_failure(consecutive, now);
+    let error = outcome
+        .error
+        .clone()
+        .unwrap_or_else(|| match outcome.status_code {
+            Some(code) => format!("the endpoint answered {}", code),
+            None => "the request failed".to_string(),
+        });
+
+    match retry_at {
+        Some(next_at) => {
+            // The circuit and the retry schedule both delay the next attempt;
+            // whichever is later wins, so an open circuit is not defeated by a
+            // delivery whose own backoff came due first.
+            let next_at = match action {
+                breaker::Action::Open { until } => next_at.max(until),
+                _ => next_at,
+            };
+            tx.execute(
+                "UPDATE deliveries SET attempts = ?2, next_at = ?3, lease_until = NULL,
+                                       last_error = ?4, updated_at = ?5
+                 WHERE id = ?1",
+                params![job.delivery.id, attempt_no, next_at, error, now],
+            )?;
+            apply(tx, job, action, now)?;
+            Ok(match action {
+                breaker::Action::Disable => Settled::FailedAndDisabled,
+                _ => Settled::Retrying { next_at },
+            })
+        }
+        None => {
+            tx.execute(
+                "UPDATE deliveries SET status = 'failed', attempts = ?2, lease_until = NULL,
+                                       last_error = ?3, updated_at = ?4
+                 WHERE id = ?1",
+                params![job.delivery.id, attempt_no, error, now],
+            )?;
+            apply(tx, job, action, now)?;
+            Ok(match action {
+                breaker::Action::Disable => Settled::FailedAndDisabled,
+                _ => Settled::Failed,
+            })
+        }
+    }
+}
+
+fn apply(tx: &Transaction<'_>, job: &Job, action: breaker::Action, now: i64) -> Result<()> {
+    match action {
+        breaker::Action::Continue => {}
+        breaker::Action::Open { until } => {
+            store::health::open_circuit(tx, &job.endpoint.id, until)?;
+            tracing::warn!(
+                endpoint = %job.endpoint.id,
+                until,
+                "circuit opened; deliveries to this endpoint are paused"
+            );
+        }
+        breaker::Action::Disable => {
+            store::endpoints::disable(
+                tx,
+                &job.endpoint.app_id,
+                &job.endpoint.id,
+                "disabled automatically after repeated failures",
+                now,
+            )?;
+            tracing::warn!(endpoint = %job.endpoint.id, "endpoint disabled after repeated failures");
+        }
+    }
+    Ok(())
+}
+
+/// Release a lease without recording an attempt.
+///
+/// For the case where a worker claimed a delivery and then could not try it at
+/// all — the process is shutting down, say. The delivery goes straight back
+/// into the queue with its attempt count untouched, because no request was
+/// made and counting one would spend a retry on nothing.
+pub fn release(conn: &Connection, delivery_id: &str, now: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE deliveries SET lease_until = NULL, updated_at = ?2 WHERE id = ?1",
+        params![delivery_id, now],
+    )?;
+    Ok(())
+}
+
+/// How much work is waiting, for the health endpoint and for metrics.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct Depth {
+    /// Deliveries not yet in a terminal state.
+    pub pending: i64,
+    /// Of those, the ones whose next attempt is already due.
+    pub due: i64,
+    /// Deliveries a worker is holding right now.
+    pub in_flight: i64,
+    /// How long the oldest due delivery has been waiting, in milliseconds.
+    /// The number to alert on: a queue that is deep but moving is fine, and a
+    /// queue that is shallow but stuck is not.
+    pub oldest_due_age_ms: i64,
+}
+
+pub fn depth(conn: &Connection, now: i64) -> Result<Depth> {
+    let (pending, due, in_flight, oldest): (i64, i64, i64, Option<i64>) = conn.query_row(
+        "SELECT
+            count(*),
+            sum(CASE WHEN next_at <= ?1 THEN 1 ELSE 0 END),
+            sum(CASE WHEN lease_until > ?1 THEN 1 ELSE 0 END),
+            min(CASE WHEN next_at <= ?1 THEN next_at ELSE NULL END)
+         FROM deliveries WHERE status = 'pending'",
+        [now],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1).unwrap_or(0),
+                r.get(2).unwrap_or(0),
+                r.get(3)?,
+            ))
+        },
+    )?;
+    Ok(Depth {
+        pending,
+        due,
+        in_flight,
+        oldest_due_age_ms: oldest.map(|at| (now - at).max(0)).unwrap_or(0),
+    })
+}
