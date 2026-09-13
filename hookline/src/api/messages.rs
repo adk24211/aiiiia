@@ -72,7 +72,7 @@ pub async fn create(
     let (message, deliveries, duplicate) = api
         .db
         .call(move |conn| {
-            let tx = conn.transaction()?;
+            let tx = crate::db::write_tx(conn)?;
             let out = store::messages::create(
                 &tx,
                 &app_id,

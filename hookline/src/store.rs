@@ -688,6 +688,22 @@ pub mod health {
         )?;
         Ok(())
     }
+
+    /// Close the circuit and forget the failures that opened it.
+    ///
+    /// For an explicit replay. The breaker's state is an inference from past
+    /// attempts, and someone asking for a replay is telling us something we
+    /// cannot infer: that the thing those attempts failed against has been
+    /// fixed. Without this, a replay after five failures is accepted, reports
+    /// what it queued, and delivers nothing until the cooldown lapses.
+    pub fn close_circuit(conn: &Connection, endpoint_id: &str) -> Result<()> {
+        conn.execute(
+            "UPDATE endpoint_health SET circuit_open_until = NULL, consecutive_failures = 0
+             WHERE endpoint_id = ?1",
+            [endpoint_id],
+        )?;
+        Ok(())
+    }
 }
 
 pub mod keys {

@@ -65,7 +65,7 @@ pub async fn create(
     let (endpoint, secret) = api
         .db
         .call(move |conn| {
-            let tx = conn.transaction()?;
+            let tx = crate::db::write_tx(conn)?;
             let created = store::endpoints::create(
                 &tx,
                 &app_id,
@@ -213,7 +213,7 @@ pub async fn disable(
     let updated = api
         .db
         .call(move |conn| {
-            let tx = conn.transaction()?;
+            let tx = crate::db::write_tx(conn)?;
             let e = store::endpoints::disable(&tx, &app_id, &endpoint, &reason, now)?;
             tx.commit()?;
             Ok(e)
@@ -308,7 +308,7 @@ pub async fn rotate(
         .db
         .call(move |conn| {
             store::endpoints::get(conn, &app_id, &endpoint)?;
-            let tx = conn.transaction()?;
+            let tx = crate::db::write_tx(conn)?;
             let s = store::secrets::rotate(&tx, &endpoint, &secret, grace, now)?;
             tx.commit()?;
             Ok(s)

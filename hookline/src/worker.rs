@@ -124,7 +124,7 @@ impl Workers {
     async fn claim(&self, batch: usize, lease: i64) -> crate::error::Result<Vec<Job>> {
         self.db
             .call(move |conn| {
-                let tx = conn.transaction()?;
+                let tx = crate::db::write_tx(conn)?;
                 let jobs = queue::claim(&tx, now_millis(), lease, batch)?;
                 tx.commit()?;
                 Ok(jobs)
@@ -151,7 +151,7 @@ impl Workers {
         let recorded = self
             .db
             .call(move |conn| {
-                let tx = conn.transaction()?;
+                let tx = crate::db::write_tx(conn)?;
                 let settled = queue::settle(&tx, &job, &outcome, retry_at, &policy, now)?;
                 tx.commit()?;
                 Ok((settled, job))

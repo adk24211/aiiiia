@@ -27,6 +27,22 @@ impl Server {
 
     /// Serve until the process is asked to stop.
     pub async fn run(self) -> Result<(), String> {
+        let listener = tokio::net::TcpListener::bind(self.config.listen)
+            .await
+            .map_err(|e| format!("cannot listen on {}: {}", self.config.listen, e))?;
+        self.run_on(listener, signal()).await
+    }
+
+    /// Serve on a listener that is already bound, stopping when `shutdown`
+    /// resolves.
+    ///
+    /// The test suite runs the whole server this way on an ephemeral port, so
+    /// that what it exercises is this code and not a second wiring of it.
+    pub async fn run_on(
+        self,
+        listener: tokio::net::TcpListener,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), String> {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         // Leases held by the process this one is replacing would otherwise
@@ -55,14 +71,11 @@ impl Server {
             started_at: crate::now_millis(),
         });
 
-        let listener = tokio::net::TcpListener::bind(self.config.listen)
-            .await
-            .map_err(|e| format!("cannot listen on {}: {}", self.config.listen, e))?;
         let bound = listener.local_addr().unwrap_or(self.config.listen);
         tracing::info!(address = %bound, "listening");
 
         let serving = axum::serve(listener, app).with_graceful_shutdown(async move {
-            signal().await;
+            shutdown.await;
             tracing::info!("shutting down");
         });
         let result = serving

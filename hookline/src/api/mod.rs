@@ -168,6 +168,7 @@ async fn not_found() -> Error {
 #[derive(Debug, Deserialize, Default)]
 pub struct Paging {
     pub cursor: Option<String>,
+    #[serde(default, deserialize_with = "number_or_text")]
     pub limit: Option<usize>,
 }
 
@@ -175,6 +176,64 @@ impl Paging {
     pub fn limit(&self) -> usize {
         store::clamp_limit(self.limit)
     }
+}
+
+/// Read a number that may arrive as text.
+///
+/// A query string has no types, and `#[serde(flatten)]` hands the flattened
+/// fields on as the strings they arrived as — so a plain `Option<usize>` here
+/// parses `?limit=2` on a struct without a flattened filter and rejects it on
+/// one with. Accepting both spellings is the only way the same parameter
+/// behaves the same way on every listing.
+fn number_or_text<'de, D>(deserializer: D) -> std::result::Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Visitor;
+
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Option<usize>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a whole number")
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> std::result::Result<Option<usize>, E> {
+            Ok(Some(v as usize))
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> std::result::Result<Option<usize>, E> {
+            usize::try_from(v)
+                .map(Some)
+                .map_err(|_| E::custom("must not be negative"))
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<Option<usize>, E> {
+            if v.is_empty() {
+                return Ok(None);
+            }
+            v.parse()
+                .map(Some)
+                .map_err(|_| E::custom(format!("{:?} is not a whole number", v)))
+        }
+
+        fn visit_none<E: serde::de::Error>(self) -> std::result::Result<Option<usize>, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Option<usize>, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> std::result::Result<Option<usize>, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(Visitor)
+        }
+    }
+
+    deserializer.deserialize_any(Visitor)
 }
 
 /// Resolve an application reference to its id, so every handler below it works

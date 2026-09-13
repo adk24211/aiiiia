@@ -123,6 +123,22 @@ impl Db {
     }
 }
 
+/// Begin a transaction that is going to write.
+///
+/// `IMMEDIATE`, not the default `DEFERRED`, and this is not a nicety. A
+/// deferred transaction takes a read lock first and asks for the write lock
+/// when the first `UPDATE` arrives; if another connection has written in
+/// between, SQLite fails that upgrade with `SQLITE_BUSY` *immediately* and the
+/// busy timeout does not apply, because the only way out is to roll back.
+/// Taking the write lock up front is the case the busy timeout was built for:
+/// the second writer waits its turn instead of erroring.
+///
+/// The cost is that two writers serialise from the first statement rather than
+/// the first write, which is what they were going to do anyway.
+pub fn write_tx(conn: &mut Connection) -> Result<rusqlite::Transaction<'_>> {
+    Ok(conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?)
+}
+
 fn open_one(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -296,6 +312,57 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(count, 40);
+    }
+
+    #[tokio::test]
+    async fn a_transaction_that_reads_before_it_writes_waits_instead_of_failing() {
+        // The failure this pins: a DEFERRED transaction takes a read lock,
+        // and when it later asks to write, SQLite refuses with SQLITE_BUSY
+        // that the busy timeout cannot wait out. It only shows up under
+        // concurrency, which is to say in production.
+        let dir = tempdir();
+        let db = Db::open(dir.join("upgrade.db"), 4).expect("open");
+        db.call(|conn| {
+            conn.execute(
+                "CREATE TABLE counter(id INTEGER PRIMARY KEY, n INTEGER NOT NULL)",
+                [],
+            )?;
+            conn.execute("INSERT INTO counter(id, n) VALUES (1, 0)", [])?;
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        let mut tasks = Vec::new();
+        for _ in 0..24 {
+            let db = db.clone();
+            tasks.push(tokio::spawn(async move {
+                db.call(|conn| {
+                    let tx = write_tx(conn)?;
+                    let n: i64 =
+                        tx.query_row("SELECT n FROM counter WHERE id = 1", [], |r| r.get(0))?;
+                    tx.execute("UPDATE counter SET n = ?1 WHERE id = 1", [n + 1])?;
+                    tx.commit()?;
+                    Ok(())
+                })
+                .await
+            }));
+        }
+        for t in tasks {
+            t.await
+                .expect("join")
+                .expect("a read-then-write transaction should not fail");
+        }
+
+        let n: i64 = db
+            .call(|c| Ok(c.query_row("SELECT n FROM counter WHERE id = 1", [], |r| r.get(0))?))
+            .await
+            .expect("count");
+        assert_eq!(
+            n, 24,
+            "an increment was lost, so two transactions read the same value"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A unique scratch directory. Writing one rather than taking a dependency

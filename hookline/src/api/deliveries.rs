@@ -147,7 +147,11 @@ pub async fn replay(
     let now = crate::now_millis();
     let replayed = api
         .db
-        .call(move |conn| store::deliveries::replay(conn, &app_id, &delivery, now))
+        .call(move |conn| {
+            let d = store::deliveries::replay(conn, &app_id, &delivery, now)?;
+            store::health::close_circuit(conn, &d.endpoint_id)?;
+            Ok(d)
+        })
         .await?;
     api.wake.poke();
     Ok(Json(replayed))
@@ -217,7 +221,7 @@ pub async fn replay_endpoint(
         .db
         .call(move |conn| {
             store::endpoints::get(conn, &app_id, &endpoint)?;
-            let tx = conn.transaction()?;
+            let tx = crate::db::write_tx(conn)?;
             let ids: Vec<String> = {
                 let mut stmt = tx.prepare(
                     "SELECT id FROM deliveries
@@ -239,6 +243,7 @@ pub async fn replay_endpoint(
                 store::deliveries::replay(&tx, &app_id, &id, now)?;
                 count += 1;
             }
+            store::health::close_circuit(&tx, &endpoint)?;
             tx.commit()?;
             Ok((count, more))
         })
