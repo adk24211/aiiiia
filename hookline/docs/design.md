@@ -79,6 +79,14 @@ explicit replay closes the circuit, because the breaker's state is an
 inference from past attempts and a replay is someone telling us the thing
 those attempts failed against has been fixed — which cannot be inferred.
 
+Closing the circuit is not sufficient on its own, which took running the thing
+to notice. Opening the breaker pushes each failing delivery's next attempt out
+to the end of the cooldown, and clearing the breaker does not pull those times
+back — so the queue unblocks and still delivers nothing for half an hour.
+Resuming an endpoint therefore does both: clear the breaker, and make
+everything pending for it due now. The backoff being discarded was a guess
+about an endpoint the operator has just told us about directly.
+
 ## Rate limits are spacing, not a bucket
 
 An endpoint may cap how many deliveries a minute it will take. That is

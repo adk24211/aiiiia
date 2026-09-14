@@ -356,6 +356,19 @@ views.endpoint = async (appId, endpointId) => {
       showSecret(made.secret, "Both secrets sign until the old one expires.");
     } catch (e) { toast(e.message, true); }
   };
+  const resume = el("button", {
+    className: health.circuit_open_until && health.circuit_open_until > Date.now() ? "primary" : "",
+    textContent: "It works again",
+  });
+  resume.onclick = async () => {
+    try {
+      const result = await api(base + "/resume", { method: "POST", body: "{}" });
+      toast(result.brought_forward
+        ? "circuit cleared, " + result.brought_forward + " deliveries due now"
+        : "circuit cleared");
+      render();
+    } catch (e) { toast(e.message, true); }
+  };
   const replayAll = el("button", { textContent: "Replay failed" });
   replayAll.onclick = async () => {
     try {
@@ -384,7 +397,7 @@ views.endpoint = async (appId, endpointId) => {
             health.consecutive_failures + " consecutive failures"),
           endpoint.disabled_reason
             ? el("div", { className: "error" }, endpoint.disabled_reason) : null),
-        el("div", {}, toggle, " ", rotate, " ", replayAll))),
+        el("div", {}, toggle, " ", resume, " ", rotate, " ", replayAll))),
     el("div", { className: "card" },
       el("h2", {}, "Recent deliveries"),
       deliveries.data.length

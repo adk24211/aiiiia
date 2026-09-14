@@ -232,10 +232,56 @@ pub async fn enable(
     let now = crate::now_millis();
     let updated = api
         .db
-        .call(move |conn| store::endpoints::enable(conn, &app_id, &endpoint, now))
+        .call(move |conn| {
+            let tx = crate::db::write_tx(conn)?;
+            let e = store::endpoints::enable(&tx, &app_id, &endpoint, now)?;
+            store::endpoints::resume(&tx, &app_id, &endpoint, now)?;
+            tx.commit()?;
+            Ok(e)
+        })
         .await?;
     api.wake.poke();
     Ok(Json(updated))
+}
+
+#[derive(Serialize)]
+pub struct Resumed {
+    #[serde(flatten)]
+    pub endpoint: Endpoint,
+    /// Deliveries whose next attempt was brought forward to now.
+    pub brought_forward: usize,
+}
+
+/// Tell hookline the endpoint works again.
+///
+/// Clears the circuit breaker *and* makes everything still queued for the
+/// endpoint due immediately. Clearing the breaker alone would leave each
+/// pending delivery waiting out the cooldown it was deferred by, which after
+/// a long outage is half an hour of a queue that is no longer blocked
+/// delivering nothing.
+pub async fn resume(
+    State(api): State<Api>,
+    identity: Identity,
+    Path((app, endpoint)): Path<(String, String)>,
+) -> Result<Json<Resumed>> {
+    identity.require_write()?;
+    let app_id = app_id(&api.db, &app).await?;
+    let now = crate::now_millis();
+    let (endpoint, brought_forward) = api
+        .db
+        .call(move |conn| {
+            let tx = crate::db::write_tx(conn)?;
+            let n = store::endpoints::resume(&tx, &app_id, &endpoint, now)?;
+            let e = store::endpoints::get(&tx, &app_id, &endpoint)?;
+            tx.commit()?;
+            Ok((e, n))
+        })
+        .await?;
+    api.wake.poke();
+    Ok(Json(Resumed {
+        endpoint,
+        brought_forward,
+    }))
 }
 
 pub async fn health(

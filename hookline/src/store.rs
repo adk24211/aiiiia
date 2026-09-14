@@ -249,6 +249,32 @@ pub mod endpoints {
         )?;
         Ok(())
     }
+
+    /// Act on an operator saying the endpoint works again.
+    ///
+    /// Closing the circuit is not enough on its own, and this is the subtle
+    /// part. When the breaker opened, each failing delivery's next attempt was
+    /// pushed out to whichever was later, its own backoff or the end of the
+    /// cooldown — and after enough consecutive failures that cooldown is half
+    /// an hour. Clearing the breaker does not pull those times back, so an
+    /// operator who has just fixed their endpoint watches a queue that is no
+    /// longer blocked deliver nothing for another half hour.
+    ///
+    /// So both: the breaker is cleared and everything still pending for the
+    /// endpoint becomes due now. That is what the operator asked for, and the
+    /// backoff they are losing was a guess about an endpoint they have just
+    /// told us about directly.
+    ///
+    /// Returns how many deliveries were brought forward.
+    pub fn resume(conn: &Connection, app_id: &str, id: &str, now: i64) -> Result<usize> {
+        get(conn, app_id, id)?;
+        health::close_circuit(conn, id)?;
+        Ok(conn.execute(
+            "UPDATE deliveries SET next_at = ?2, updated_at = ?2
+             WHERE endpoint_id = ?1 AND status = 'pending' AND next_at > ?2",
+            params![id, now],
+        )?)
+    }
 }
 
 pub mod secrets {

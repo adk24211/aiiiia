@@ -148,8 +148,13 @@ pub async fn replay(
     let replayed = api
         .db
         .call(move |conn| {
-            let d = store::deliveries::replay(conn, &app_id, &delivery, now)?;
-            store::health::close_circuit(conn, &d.endpoint_id)?;
+            let tx = crate::db::write_tx(conn)?;
+            let d = store::deliveries::replay(&tx, &app_id, &delivery, now)?;
+            // The whole endpoint's breaker, not just this delivery: a replay
+            // is the operator saying the endpoint works, and a closed circuit
+            // is the only way this delivery gets sent at all.
+            store::health::close_circuit(&tx, &d.endpoint_id)?;
+            tx.commit()?;
             Ok(d)
         })
         .await?;
@@ -243,7 +248,7 @@ pub async fn replay_endpoint(
                 store::deliveries::replay(&tx, &app_id, &id, now)?;
                 count += 1;
             }
-            store::health::close_circuit(&tx, &endpoint)?;
+            store::endpoints::resume(&tx, &app_id, &endpoint, now)?;
             tx.commit()?;
             Ok((count, more))
         })

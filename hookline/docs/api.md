@@ -66,7 +66,8 @@ thing that happens.
 | `PATCH /v1/apps/{app}/endpoints/{endpoint}` | |
 | `DELETE /v1/apps/{app}/endpoints/{endpoint}` | |
 | `POST /v1/apps/{app}/endpoints/{endpoint}/disable` | `{ reason? }`, and cancels what is queued for it |
-| `POST /v1/apps/{app}/endpoints/{endpoint}/enable` | and clears the breaker |
+| `POST /v1/apps/{app}/endpoints/{endpoint}/enable` | and resumes it |
+| `POST /v1/apps/{app}/endpoints/{endpoint}/resume` | the endpoint works again: clear the breaker and make queued deliveries due now |
 | `GET /v1/apps/{app}/endpoints/{endpoint}/health` | the breaker's view |
 
 The create returns the signing secret. It is also available from the secrets
@@ -146,10 +147,19 @@ Answers `{ "replayed": 250, "more": true }`. Bounded and repeatable rather
 than one sweeping call: an endpoint with a month of failures behind it would
 otherwise receive all of them the moment it came back.
 
-A replay also closes the endpoint's circuit breaker. The breaker is an
-inference from past attempts; asking for a replay says the thing those
-attempts failed against has been fixed, which is not something the server can
-infer on its own.
+A bulk replay also *resumes* the endpoint: it clears the breaker and makes
+everything still queued for that endpoint due now. Clearing the breaker alone
+is not enough, and this is the part that is easy to get wrong. When the
+breaker opened, each failing delivery's next attempt was pushed out to
+whichever came later — its own backoff, or the end of the cooldown — and after
+a long outage that cooldown is half an hour. An operator who has just fixed
+their endpoint would otherwise watch a queue that is no longer blocked deliver
+nothing for another half hour.
+
+`POST .../resume` is the same thing without re-queueing anything terminal: use
+it when the failures have not been given up on yet, which is the usual case
+while a breaker is open. It answers `brought_forward` — how many deliveries it
+un-parked.
 
 ## Keys
 

@@ -64,6 +64,10 @@ pub fn router(state: Api) -> Router {
             post(endpoints::enable),
         )
         .route(
+            "/apps/:app/endpoints/:endpoint/resume",
+            post(endpoints::resume),
+        )
+        .route(
             "/apps/:app/endpoints/:endpoint/health",
             get(endpoints::health),
         )

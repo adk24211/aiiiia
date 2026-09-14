@@ -524,3 +524,142 @@ async fn a_rate_limited_endpoint_is_fed_slowly_and_still_fed() {
     // And it is a limit, not a cap: everything arrives in the end.
     consumer.wait_for(6, PATIENCE).await;
 }
+
+#[tokio::test]
+async fn an_endpoint_that_is_fixed_delivers_at_once_not_after_the_cooldown() {
+    // The failure this pins, found by running the thing: an endpoint fails
+    // enough times to open the breaker, which pushes every pending delivery's
+    // next attempt out to the end of a cooldown that grows to half an hour.
+    // The operator fixes the endpoint and says so. Clearing the breaker alone
+    // leaves those deliveries where the cooldown put them, so a queue that is
+    // no longer blocked delivers nothing for another half hour.
+    let consumer = Consumer::start().await;
+    consumer.behave(Behaviour::Status(500));
+    let hookline = Harness::start_with(|mut c| {
+        c.breaker.failures_to_open = 2;
+        c.breaker.cooldown = Duration::from_secs(1800);
+        c.breaker.max_cooldown = Duration::from_secs(1800);
+        c
+    })
+    .await;
+    let (app, endpoint, _) = hookline.wire(&consumer.url(), None).await;
+
+    for i in 0..6 {
+        hookline
+            .post(
+                &format!("/v1/apps/{}/messages", app),
+                serde_json::json!({ "event_type": "x", "payload": { "i": i } }),
+            )
+            .await;
+    }
+
+    // Wait for the breaker to open.
+    let deadline = std::time::Instant::now() + PATIENCE;
+    loop {
+        let (_, health) = hookline
+            .get(&format!("/v1/apps/{}/endpoints/{}/health", app, endpoint))
+            .await;
+        if !health["circuit_open_until"].is_null() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the circuit never opened"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Deliveries are now parked half an hour out.
+    let (_, parked) = hookline
+        .get(&format!(
+            "/v1/apps/{}/endpoints/{}/deliveries?status=pending&limit=250",
+            app, endpoint
+        ))
+        .await;
+    let parked = parked["data"].as_array().expect("deliveries").clone();
+    assert!(!parked.is_empty(), "there should be work waiting");
+    let now = hookline::now_millis();
+    assert!(
+        parked
+            .iter()
+            .any(|d| d["next_at"].as_i64().unwrap() > now + 60_000),
+        "the cooldown should have pushed at least one delivery well into the future"
+    );
+
+    // The customer fixes their endpoint and the operator says so.
+    consumer.behave(Behaviour::Ok);
+    let before = consumer.count();
+    let (status, resumed) = hookline
+        .post(
+            &format!("/v1/apps/{}/endpoints/{}/resume", app, endpoint),
+            serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(status, 200, "{:?}", resumed);
+    assert!(
+        resumed["brought_forward"].as_u64().unwrap() > 0,
+        "resume should say how much work it un-parked: {:?}",
+        resumed
+    );
+
+    // And it is delivered now, not in half an hour.
+    consumer.wait_for(before + parked.len(), PATIENCE).await;
+    let (_, health) = hookline
+        .get(&format!("/v1/apps/{}/endpoints/{}/health", app, endpoint))
+        .await;
+    assert!(health["circuit_open_until"].is_null());
+}
+
+#[tokio::test]
+async fn a_bulk_replay_also_un_parks_what_the_breaker_deferred() {
+    // "Replay failed" while the breaker is open reports the failed deliveries
+    // it re-queued and says nothing about the pending ones the cooldown is
+    // holding. Re-queueing three and leaving eight parked for half an hour is
+    // not what the operator asked for.
+    let consumer = Consumer::start().await;
+    consumer.behave(Behaviour::Status(500));
+    let hookline = Harness::start_with(|mut c| {
+        c.breaker.failures_to_open = 2;
+        c.breaker.cooldown = Duration::from_secs(1800);
+        c.breaker.max_cooldown = Duration::from_secs(1800);
+        c
+    })
+    .await;
+    let (app, endpoint, _) = hookline.wire(&consumer.url(), None).await;
+
+    for i in 0..5 {
+        hookline
+            .post(
+                &format!("/v1/apps/{}/messages", app),
+                serde_json::json!({ "event_type": "x", "payload": { "i": i } }),
+            )
+            .await;
+    }
+    let deadline = std::time::Instant::now() + PATIENCE;
+    loop {
+        let (_, health) = hookline
+            .get(&format!("/v1/apps/{}/endpoints/{}/health", app, endpoint))
+            .await;
+        if !health["circuit_open_until"].is_null() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the circuit never opened"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    consumer.behave(Behaviour::Ok);
+    let before = consumer.count();
+    hookline
+        .post(
+            &format!("/v1/apps/{}/endpoints/{}/replay", app, endpoint),
+            serde_json::json!({}),
+        )
+        .await;
+
+    // Every one of the five arrives, whether it had been given up on or was
+    // merely parked behind the cooldown.
+    consumer.wait_for(before + 5, PATIENCE).await;
+}
