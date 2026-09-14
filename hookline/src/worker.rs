@@ -173,6 +173,11 @@ impl Workers {
 
 fn log(job: &Job, settled: Settled) {
     match settled {
+        Settled::Superseded => tracing::info!(
+            delivery = %job.delivery.id,
+            endpoint = %job.endpoint.id,
+            "the delivery was changed through the API while it was being sent"
+        ),
         Settled::Succeeded => tracing::info!(
             delivery = %job.delivery.id,
             endpoint = %job.endpoint.id,

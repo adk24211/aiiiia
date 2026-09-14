@@ -78,6 +78,14 @@ cargo test --release            # must be green
   parked every delivery for ever. Refuse it at the edge, and never let a stored
   one strand a queue.
 
+* **Two writers, one row.** A worker's view of a delivery is seconds old by the
+  time the answer comes back. Its writes carry the lease and the attempt count
+  it read, so an operator's cancel or replay in between is not silently undone
+  and a duplicated claim cannot advance the counter twice.
+* **A replay must not steal a live lease.** Clearing one makes the row
+  claimable while the request is still open, and the consumer gets two copies
+  in the same second.
+
 ## Writing
 
 Comments explain why, never what. If a line needs a comment to say what it

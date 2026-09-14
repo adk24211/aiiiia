@@ -150,6 +150,11 @@ Answers `{ "replayed": 250, "more": true }`. Bounded and repeatable rather
 than one sweeping call: an endpoint with a month of failures behind it would
 otherwise receive all of them the moment it came back.
 
+Replaying or cancelling a delivery that a worker is sending right now is safe
+and does what you asked: the attempt in flight is recorded, and your decision
+is what the delivery ends up in. A replay does not interrupt that attempt — it
+goes out as soon as it returns.
+
 A bulk replay also *resumes* the endpoint: it clears the breaker and makes
 everything still queued for that endpoint due now. Clearing the breaker alone
 is not enough, and this is the part that is easy to get wrong. When the

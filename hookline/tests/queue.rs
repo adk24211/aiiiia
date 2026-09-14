@@ -682,3 +682,186 @@ async fn a_stored_rate_limit_of_zero_still_drains() {
     .await
     .expect("queue");
 }
+
+#[tokio::test]
+async fn a_cancel_made_while_the_request_was_in_flight_stands() {
+    // The worker's write was keyed only on the delivery id, so a result
+    // derived from a decision made before the operator's silently replaced
+    // theirs: cancel answered 200 and the row came back as succeeded.
+    let db = Db::in_memory().expect("open");
+    db.call(|conn| {
+        let (app_id, _) = seed(conn, 1)?;
+        let policy = breaker::Policy::default();
+
+        let tx = conn.transaction()?;
+        let job = queue::claim(&tx, NOW, queue::DEFAULT_LEASE, 1)?.remove(0);
+        tx.commit()?;
+
+        // The operator cancels while the request is open.
+        store::deliveries::cancel(conn, &app_id, &job.delivery.id, NOW + 1)?;
+
+        // The request then comes back successful.
+        let tx = conn.transaction()?;
+        let settled = queue::settle(&tx, &job, &success(), None, &policy, NOW + 2)?;
+        tx.commit()?;
+
+        assert_eq!(settled, Settled::Superseded);
+        let delivery = store::deliveries::get(conn, &app_id, &job.delivery.id)?;
+        assert_eq!(
+            delivery.status,
+            DeliveryStatus::Cancelled,
+            "the operator's decision must survive a result that predates it"
+        );
+
+        // The request really happened, so it is still in the audit trail.
+        let attempts = store::attempts::for_delivery(conn, &app_id, &job.delivery.id)?;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].status, "success");
+        Ok(())
+    })
+    .await
+    .expect("queue");
+}
+
+#[tokio::test]
+async fn a_replay_made_while_the_request_was_in_flight_stands() {
+    let db = Db::in_memory().expect("open");
+    db.call(|conn| {
+        let (app_id, _) = seed(conn, 1)?;
+        let policy = breaker::Policy::default();
+
+        // Get the delivery to a later attempt so the replay's reset is visible.
+        let tx = conn.transaction()?;
+        let first = queue::claim(&tx, NOW, queue::DEFAULT_LEASE, 1)?.remove(0);
+        queue::settle(&tx, &first, &failure(500), Some(NOW + 1), &policy, NOW)?;
+        tx.commit()?;
+
+        let tx = conn.transaction()?;
+        let job = queue::claim(&tx, NOW + 1, queue::DEFAULT_LEASE, 1)?.remove(0);
+        tx.commit()?;
+        assert_eq!(job.delivery.attempts, 1);
+
+        // The operator replays while that second request is open.
+        store::deliveries::replay(conn, &app_id, &job.delivery.id, NOW + 2)?;
+
+        // The in-flight request then fails for the last time.
+        let tx = conn.transaction()?;
+        let settled = queue::settle(&tx, &job, &failure(404), None, &policy, NOW + 3)?;
+        tx.commit()?;
+
+        assert_eq!(settled, Settled::Superseded);
+        let delivery = store::deliveries::get(conn, &app_id, &job.delivery.id)?;
+        assert_eq!(
+            delivery.status,
+            DeliveryStatus::Pending,
+            "the replay must survive"
+        );
+        assert_eq!(
+            delivery.attempts, 0,
+            "and it must still be a fresh schedule"
+        );
+
+        // And it is claimable at once: the superseded settle released the lease
+        // it was holding.
+        let tx = conn.transaction()?;
+        let again = queue::claim(&tx, NOW + 4, queue::DEFAULT_LEASE, 1)?;
+        tx.commit()?;
+        assert_eq!(
+            again.len(),
+            1,
+            "the replayed delivery should go out immediately"
+        );
+        Ok(())
+    })
+    .await
+    .expect("queue");
+}
+
+#[tokio::test]
+async fn a_replay_does_not_steal_a_lease_a_worker_is_holding() {
+    // Clearing a live lease makes the row claimable while a worker is in the
+    // middle of sending it, and the consumer receives two copies at the same
+    // moment — the exact thing the lease exists to prevent.
+    let db = Db::in_memory().expect("open");
+    db.call(|conn| {
+        let (app_id, _) = seed(conn, 1)?;
+
+        let tx = conn.transaction()?;
+        let job = queue::claim(&tx, NOW, queue::DEFAULT_LEASE, 1)?.remove(0);
+        tx.commit()?;
+
+        store::deliveries::replay(conn, &app_id, &job.delivery.id, NOW + 1)?;
+
+        let tx = conn.transaction()?;
+        let concurrent = queue::claim(&tx, NOW + 2, queue::DEFAULT_LEASE, 10)?;
+        tx.commit()?;
+        assert!(
+            concurrent.is_empty(),
+            "a second worker took a delivery that was still being sent"
+        );
+
+        // Once the lease expires it is claimable again, as always.
+        let tx = conn.transaction()?;
+        let later = queue::claim(
+            &tx,
+            NOW + queue::DEFAULT_LEASE + 1,
+            queue::DEFAULT_LEASE,
+            10,
+        )?;
+        tx.commit()?;
+        assert_eq!(later.len(), 1);
+        Ok(())
+    })
+    .await
+    .expect("queue");
+}
+
+#[tokio::test]
+async fn a_settle_from_a_worker_that_lost_the_lease_does_not_double_count() {
+    // Two workers holding the same delivery — which a lease that expired
+    // mid-request produces — must not both advance the attempt counter.
+    let db = Db::in_memory().expect("open");
+    db.call(|conn| {
+        let (app_id, _) = seed(conn, 1)?;
+        let policy = breaker::Policy::default();
+
+        let tx = conn.transaction()?;
+        let first = queue::claim(&tx, NOW, queue::DEFAULT_LEASE, 1)?.remove(0);
+        tx.commit()?;
+
+        // The lease lapses and a second worker takes it.
+        let tx = conn.transaction()?;
+        let second =
+            queue::claim(&tx, NOW + queue::DEFAULT_LEASE + 1, queue::DEFAULT_LEASE, 1)?.remove(0);
+        tx.commit()?;
+        assert_eq!(second.delivery.id, first.delivery.id);
+
+        // The second finishes first, then the abandoned one comes back.
+        let tx = conn.transaction()?;
+        let live = queue::settle(&tx, &second, &success(), None, &policy, NOW + 100)?;
+        tx.commit()?;
+        let tx = conn.transaction()?;
+        let stale = queue::settle(
+            &tx,
+            &first,
+            &failure(500),
+            Some(NOW + 200),
+            &policy,
+            NOW + 101,
+        )?;
+        tx.commit()?;
+
+        assert_eq!(live, Settled::Succeeded);
+        assert_eq!(
+            stale,
+            Settled::Superseded,
+            "the abandoned worker must not overwrite"
+        );
+        let delivery = store::deliveries::get(conn, &app_id, &first.delivery.id)?;
+        assert_eq!(delivery.status, DeliveryStatus::Succeeded);
+        assert_eq!(delivery.attempts, 1, "one row, one advance of the counter");
+        Ok(())
+    })
+    .await
+    .expect("queue");
+}

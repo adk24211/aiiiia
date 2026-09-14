@@ -552,11 +552,22 @@ pub mod deliveries {
     /// The attempt counter resets, so a replay gets the full retry schedule:
     /// a replay is a new decision to deliver, not a continuation of the one
     /// that ran out.
+    ///
+    /// A lease that is still live is left alone. Clearing it would make the
+    /// row claimable while a worker is in the middle of sending it, and the
+    /// consumer would receive two copies at the same moment — the exact thing
+    /// the lease exists to prevent, and which the server refuses to start
+    /// without. The in-flight attempt finds the row changed underneath it,
+    /// records what happened, releases the lease and leaves this state
+    /// standing, so the replay goes out the moment that attempt returns.
     pub fn replay(conn: &Connection, app_id: &str, id: &str, now: i64) -> Result<Delivery> {
         let delivery = get(conn, app_id, id)?;
         conn.execute(
             "UPDATE deliveries SET status = 'pending', attempts = 0, next_at = ?2,
-                                   lease_until = NULL, last_error = NULL, updated_at = ?2
+                                   last_error = NULL, updated_at = ?2,
+                                   lease_until = CASE
+                                       WHEN lease_until > ?2 THEN lease_until ELSE NULL
+                                   END
              WHERE id = ?1",
             params![delivery.id, now],
         )?;

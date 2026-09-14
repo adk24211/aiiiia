@@ -36,6 +36,13 @@ pub struct Job {
     pub endpoint: Endpoint,
     pub message: Message,
     pub secrets: Vec<String>,
+    /// The lease this worker was granted, as written at claim time.
+    ///
+    /// Carried so that [`settle`] can prove it is still the owner of the row
+    /// it is about to write. Between the claim and the answer coming back, the
+    /// API may have cancelled the delivery or replayed it, and a write keyed
+    /// only on the id would silently undo whichever the operator asked for.
+    pub lease_until: i64,
 }
 
 /// The period a per-endpoint rate limit is expressed over: `rate_limit`
@@ -74,6 +81,7 @@ pub fn claim(
         )?);
     }
 
+    let lease_until = now + lease_millis;
     let mut jobs = Vec::with_capacity(claimed.len());
     for delivery in claimed {
         let endpoint = store::endpoints::get(conn, &delivery.app_id, &delivery.endpoint_id)?;
@@ -84,6 +92,7 @@ pub fn claim(
             endpoint,
             message,
             secrets,
+            lease_until,
         });
     }
     Ok(jobs)
@@ -212,6 +221,9 @@ pub struct Outcome {
 /// What happened to the delivery as a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settled {
+    /// The API changed this delivery while the request was in flight, so the
+    /// attempt is recorded and the operator's decision is left standing.
+    Superseded,
     Succeeded,
     /// Another attempt is due at this time.
     Retrying {
@@ -255,13 +267,24 @@ pub fn settle(
     )?;
 
     if outcome.succeeded {
-        tx.execute(
+        // The endpoint's health is about the endpoint, not about this row, so
+        // it is recorded whether or not the delivery is still ours to write.
+        store::health::record_success(tx, &job.endpoint.id, now)?;
+        let changed = tx.execute(
             "UPDATE deliveries SET status = 'succeeded', attempts = ?2, lease_until = NULL,
                                    last_error = NULL, updated_at = ?3
-             WHERE id = ?1",
-            params![job.delivery.id, attempt_no, now],
+             WHERE id = ?1 AND status = 'pending' AND attempts = ?4 AND lease_until = ?5",
+            params![
+                job.delivery.id,
+                attempt_no,
+                now,
+                job.delivery.attempts,
+                job.lease_until
+            ],
         )?;
-        store::health::record_success(tx, &job.endpoint.id, now)?;
+        if changed == 0 {
+            return superseded(tx, job, now);
+        }
         return Ok(Settled::Succeeded);
     }
 
@@ -284,32 +307,76 @@ pub fn settle(
                 breaker::Action::Open { until } => next_at.max(until),
                 _ => next_at,
             };
-            tx.execute(
+            let changed = tx.execute(
                 "UPDATE deliveries SET attempts = ?2, next_at = ?3, lease_until = NULL,
                                        last_error = ?4, updated_at = ?5
-                 WHERE id = ?1",
-                params![job.delivery.id, attempt_no, next_at, error, now],
+                 WHERE id = ?1 AND status = 'pending' AND attempts = ?6
+                   AND lease_until = ?7",
+                params![
+                    job.delivery.id,
+                    attempt_no,
+                    next_at,
+                    error,
+                    now,
+                    job.delivery.attempts,
+                    job.lease_until
+                ],
             )?;
             apply(tx, job, action, now)?;
+            if changed == 0 {
+                return superseded(tx, job, now);
+            }
             Ok(match action {
                 breaker::Action::Disable => Settled::FailedAndDisabled,
                 _ => Settled::Retrying { next_at },
             })
         }
         None => {
-            tx.execute(
+            let changed = tx.execute(
                 "UPDATE deliveries SET status = 'failed', attempts = ?2, lease_until = NULL,
                                        last_error = ?3, updated_at = ?4
-                 WHERE id = ?1",
-                params![job.delivery.id, attempt_no, error, now],
+                 WHERE id = ?1 AND status = 'pending' AND attempts = ?5
+                   AND lease_until = ?6",
+                params![
+                    job.delivery.id,
+                    attempt_no,
+                    error,
+                    now,
+                    job.delivery.attempts,
+                    job.lease_until
+                ],
             )?;
             apply(tx, job, action, now)?;
+            if changed == 0 {
+                return superseded(tx, job, now);
+            }
             Ok(match action {
                 breaker::Action::Disable => Settled::FailedAndDisabled,
                 _ => Settled::Failed,
             })
         }
     }
+}
+
+/// The row moved on without us: the API cancelled, replayed, or re-queued this
+/// delivery while the request was in flight.
+///
+/// The attempt is already recorded — it genuinely happened — and so is what it
+/// said about the endpoint's health. What must not happen is writing a state
+/// derived from a decision that predates the operator's, so the row is left
+/// exactly as they set it. The lease is released only if we still hold it,
+/// since by now it may belong to someone else.
+fn superseded(tx: &Transaction<'_>, job: &Job, now: i64) -> Result<Settled> {
+    tx.execute(
+        "UPDATE deliveries SET lease_until = NULL, updated_at = ?3
+         WHERE id = ?1 AND lease_until = ?2",
+        params![job.delivery.id, job.lease_until, now],
+    )?;
+    tracing::info!(
+        delivery = %job.delivery.id,
+        "the delivery changed while it was being sent; the attempt stands, the row does not"
+    );
+    Ok(Settled::Superseded)
 }
 
 fn apply(tx: &Transaction<'_>, job: &Job, action: breaker::Action, now: i64) -> Result<()> {

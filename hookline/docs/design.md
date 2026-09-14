@@ -45,6 +45,34 @@ concurrency that matters is in the HTTP requests, which is where the time
 goes. Posting a message wakes the claimer, so the poll interval is the latency
 floor for retries, not for the common case.
 
+## Two writers, one row
+
+A delivery is written by a worker that is sending it and by the API that an
+operator is using, at the same time, and the worker's information is always a
+little out of date: it was read when the delivery was claimed, and the answer
+comes back seconds later. A write keyed only on the delivery id therefore
+undoes whatever the operator decided in between — a cancel comes back as
+`succeeded`, a replay comes back as `failed`.
+
+So a worker writes only what it still owns. The lease it was granted and the
+attempt count it read are both in the `WHERE` clause, and if no row matches,
+the delivery has moved on: the attempt is recorded, because the request really
+happened and the audit trail should say so, the endpoint's health is updated,
+because that is about the endpoint rather than this row, and the delivery
+itself is left exactly as the operator set it.
+
+The same clause makes a duplicated claim harmless. A lease that lapses while a
+request is still open means two workers hold the same delivery; only one of
+them can match, so the attempt counter advances once.
+
+The other half is that a replay must not take a lease away from a worker that
+is using it. Clearing a live lease makes the row claimable while the request
+is still open, and the consumer gets two copies of the same webhook in the
+same second — which is the exact thing the lease exists to prevent, and which
+the server refuses to start without. A replay leaves a live lease alone; the
+attempt in flight finds the row changed underneath it, releases the lease, and
+the replay goes out the moment that attempt returns.
+
 ## Retries: exponential, with full jitter
 
 Base 5s, factor 4, capped at 6 hours, ten attempts — about twenty hours, which
