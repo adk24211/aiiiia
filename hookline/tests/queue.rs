@@ -596,3 +596,89 @@ async fn a_disabled_endpoint_is_never_claimed() {
     .await
     .expect("queue");
 }
+
+#[tokio::test]
+async fn idle_rate_limited_endpoints_do_not_starve_a_busy_one() {
+    // The claim selected rate-limited endpoints that were merely *allowed*
+    // another delivery, up to the batch size. Endpoints with nothing queued
+    // filled the batch, and one with a backlog behind it was never reached.
+    let db = Db::in_memory().expect("open");
+    db.call(|conn| {
+        let app = store::apps::create(conn, "acme", None, &serde_json::json!({}), NOW)?;
+        let tx = conn.transaction()?;
+        for i in 0..30 {
+            store::endpoints::create(
+                &tx,
+                &app.id,
+                &format!("https://quiet{}.example/hook", i),
+                "",
+                Some(&["quiet".to_string()]),
+                Some(60),
+                &sign::new_secret(),
+                NOW,
+            )?;
+        }
+        let (busy, _) = store::endpoints::create(
+            &tx,
+            &app.id,
+            "https://busy.example/hook",
+            "",
+            Some(&["loud".to_string()]),
+            Some(60),
+            &sign::new_secret(),
+            NOW,
+        )?;
+        tx.commit()?;
+
+        let tx = conn.transaction()?;
+        store::messages::create(&tx, &app.id, "loud", &serde_json::json!({}), None, NOW)?;
+        tx.commit()?;
+
+        let tx = conn.transaction()?;
+        let claimed = queue::claim(&tx, NOW, queue::DEFAULT_LEASE, 16)?;
+        tx.commit()?;
+        assert_eq!(
+            claimed.iter().filter(|j| j.endpoint.id == busy.id).count(),
+            1,
+            "the only endpoint with work should have been claimed, not crowded out by 30 idle ones"
+        );
+        Ok(())
+    })
+    .await
+    .expect("queue");
+}
+
+#[tokio::test]
+async fn a_stored_rate_limit_of_zero_still_drains() {
+    // The API refuses zero. A row that carries one anyway — an older database,
+    // a direct edit — must still be delivered to slowly rather than parked for
+    // ever: a queue that silently never drains is the worst available
+    // behaviour.
+    let db = Db::in_memory().expect("open");
+    db.call(|conn| {
+        let app = store::apps::create(conn, "acme", None, &serde_json::json!({}), NOW)?;
+        let tx = conn.transaction()?;
+        store::endpoints::create(
+            &tx,
+            &app.id,
+            "https://example.com/hook",
+            "",
+            None,
+            Some(0),
+            &sign::new_secret(),
+            NOW,
+        )?;
+        tx.commit()?;
+        let tx = conn.transaction()?;
+        store::messages::create(&tx, &app.id, "x", &serde_json::json!({}), None, NOW)?;
+        tx.commit()?;
+
+        let tx = conn.transaction()?;
+        let claimed = queue::claim(&tx, NOW, queue::DEFAULT_LEASE, 16)?;
+        tx.commit()?;
+        assert_eq!(claimed.len(), 1, "a zero limit must not mean never");
+        Ok(())
+    })
+    .await
+    .expect("queue");
+}

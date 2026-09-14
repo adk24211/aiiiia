@@ -204,12 +204,27 @@ fn describe(e: &reqwest::Error) -> String {
     if e.is_redirect() {
         return "the endpoint redirected, which is not followed".to_string();
     }
-    let text = e.to_string();
-    if text.len() > 200 {
-        format!("{}...", &text[..200])
-    } else {
-        text
+    clip(&e.to_string(), 200)
+}
+
+/// Shorten a message to at most `max` bytes without splitting a character.
+///
+/// The naive `&text[..max]` panics when that offset lands inside a multi-byte
+/// character, and this runs on text nobody here controls: a hostname, a TLS
+/// library's message, a URL. A panic here would be the worst kind, too — it
+/// happens while a delivery is leased, so the lease expires, the delivery is
+/// retried, and it panics again, for ever, with no attempt ever recorded.
+fn clip(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
     }
+    let end = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|&i| i <= max)
+        .last()
+        .unwrap_or(0);
+    format!("{}...", &text[..end])
 }
 
 use std::error::Error as _;
@@ -251,6 +266,33 @@ mod tests {
     fn the_two_timing_answers_are_retried() {
         assert!(is_retryable(&outcome(Some(408))));
         assert!(is_retryable(&outcome(Some(429))));
+    }
+
+    #[test]
+    fn clipping_never_splits_a_character() {
+        // The message being shortened is a hostname, a TLS library's text, or
+        // a URL — none of which this crate controls, and any of which can be
+        // non-ASCII. A panic here poisons the delivery for ever.
+        for text in [
+            "결제 서버에 연결할 수 없습니다".repeat(40),
+            "é".repeat(500),
+            "a".repeat(500),
+            "日本語のエラーメッセージ".repeat(50),
+            "ascii then 한글 then more".repeat(30),
+        ] {
+            let clipped = clip(&text, 200);
+            assert!(clipped.len() <= 204, "{} bytes is too long", clipped.len());
+            assert!(text.starts_with(clipped.trim_end_matches("...")));
+        }
+    }
+
+    #[test]
+    fn clipping_leaves_a_short_message_alone() {
+        assert_eq!(clip("연결 실패", 200), "연결 실패");
+        assert_eq!(clip("", 200), "");
+        // A boundary that lands exactly on the limit must not add an ellipsis.
+        let exact = "a".repeat(200);
+        assert_eq!(clip(&exact, 200), exact);
     }
 
     #[test]

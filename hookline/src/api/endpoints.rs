@@ -42,6 +42,7 @@ pub async fn create(
 ) -> Result<Json<CreatedEndpoint>> {
     identity.require_write()?;
     let app_id = app_id(&api.db, &app).await?;
+    rate_limit(body.rate_limit)?;
 
     // The URL is judged now, so a typo or a private address is a 400 here
     // rather than a delivery that fails hours later for reasons the person
@@ -149,6 +150,9 @@ pub async fn update(
 ) -> Result<Json<Endpoint>> {
     identity.require_write()?;
     let app_id = app_id(&api.db, &app).await?;
+    if let Some(Some(limit)) = body.rate_limit {
+        rate_limit(Some(limit))?;
+    }
     if let Some(url) = &body.url {
         guard::check_url(url, &api.config.destinations)
             .map_err(|why| Error::invalid(format!("{}", why)))?;
@@ -380,6 +384,18 @@ pub async fn revoke(
     Ok(Json(serde_json::json!({ "revoked": true })))
 }
 
+/// A rate limit of zero would park every delivery forever, which is never what
+/// anyone means by it. Switching an endpoint off is a different operation and
+/// says so in the endpoint's own state.
+fn rate_limit(value: Option<u32>) -> Result<()> {
+    match value {
+        Some(0) => Err(Error::invalid(
+            "rate_limit must be at least 1; to stop delivering to this endpoint, disable it",
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Reject a filter list that cannot match anything useful.
 fn validate_types(types: Option<Vec<String>>) -> Result<Option<Vec<String>>> {
     let Some(types) = types else { return Ok(None) };
@@ -398,8 +414,10 @@ fn validate_types(types: Option<Vec<String>>) -> Result<Option<Vec<String>>> {
             return Err(Error::invalid("an event type is over the 200 byte limit"));
         }
         // A star anywhere but the end would read as a wildcard and silently
-        // not be one.
-        if t[..t.len() - 1].contains('*') {
+        // not be one. Strip the trailing star rather than slicing off the last
+        // byte: `"결제*"` ends in a multi-byte character, and a byte slice
+        // through the middle of one panics.
+        if t.strip_suffix('*').unwrap_or(&t).contains('*') {
             return Err(Error::invalid(format!(
                 "{:?}: a wildcard is only allowed at the end, as in invoice.*",
                 t

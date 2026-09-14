@@ -432,3 +432,57 @@ async fn deleting_an_application_takes_everything_with_it() {
     .await
     .expect("store");
 }
+
+#[tokio::test]
+async fn the_secret_a_rotation_just_added_cannot_be_revoked() {
+    // Right after a rotation the old secret is still active and the new one is
+    // the only permanent one. A guard that asks "is anything active right now"
+    // happily revokes the new one, and the endpoint has nothing to sign with
+    // the instant the grace period lapses.
+    let db = Db::in_memory().expect("open");
+    db.call(|conn| {
+        let app = store::apps::create(conn, "acme", None, &serde_json::json!({}), NOW)?;
+        let tx = conn.transaction()?;
+        let (ep, _) = store::endpoints::create(
+            &tx,
+            &app.id,
+            "https://a.example/hook",
+            "",
+            None,
+            None,
+            &sign::new_secret(),
+            NOW,
+        )?;
+        tx.commit()?;
+
+        let grace = 24 * 60 * 60 * 1000;
+        let tx = conn.transaction()?;
+        let fresh = store::secrets::rotate(&tx, &ep.id, &sign::new_secret(), grace, NOW)?;
+        tx.commit()?;
+
+        let refused = store::secrets::revoke(conn, &ep.id, &fresh.id, NOW);
+        assert!(
+            refused.is_err(),
+            "revoking the only permanent secret leaves the endpoint unable to sign"
+        );
+        assert!(
+            !store::secrets::active(conn, &ep.id, NOW + grace + 1)?.is_empty(),
+            "there must still be a secret once the grace period has passed"
+        );
+
+        // The expiring one may be revoked: a permanent secret remains.
+        let secrets = store::secrets::list(conn, &ep.id)?;
+        let expiring = secrets
+            .iter()
+            .find(|s| s.expires_at.is_some())
+            .expect("the old secret");
+        store::secrets::revoke(conn, &ep.id, &expiring.id, NOW)?;
+        assert_eq!(
+            store::secrets::active(conn, &ep.id, NOW + grace + 1)?.len(),
+            1
+        );
+        Ok(())
+    })
+    .await
+    .expect("store");
+}

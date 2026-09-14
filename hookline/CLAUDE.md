@@ -65,6 +65,18 @@ cargo test --release            # must be green
 * **A rate limit is not a bucket.** A bucket that fills while an endpoint is
   quiet empties in one burst, which is what the limit was asked for to
   prevent.
+* **A limit selects endpoints, so select the ones with work.** Batching over
+  rate-limited endpoints that were merely *allowed* another delivery let thirty
+  idle ones crowd out the one with a backlog.
+* **Byte offsets are not character offsets.** `&text[..n]` panics when `n`
+  lands inside a multi-byte character, and the strings here are user text: an
+  event type, a hostname, a TLS library's message. In the sender that panic is
+  the worst kind — it happens while a delivery is leased, so the lease expires,
+  the delivery is retried, and it panics again for ever with no attempt
+  recorded.
+* **Zero is not a small number, it is a different mode.** A rate limit of zero
+  parked every delivery for ever. Refuse it at the edge, and never let a stored
+  one strand a queue.
 
 ## Writing
 

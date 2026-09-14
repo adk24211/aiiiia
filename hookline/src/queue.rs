@@ -130,13 +130,24 @@ fn claim_limited(
 ) -> Result<Vec<Delivery>> {
     let ready: Vec<(String, i64)> = {
         let mut stmt = conn.prepare(
+            // Only endpoints that actually have work due. Without the
+            // EXISTS, idle rate-limited endpoints fill the batch and one with
+            // a queue behind it is never reached — the limit becomes a way for
+            // quiet endpoints to starve a busy one.
             "SELECT e.id, e.rate_limit FROM endpoints e
              LEFT JOIN endpoint_health h ON h.endpoint_id = e.id
              WHERE e.rate_limit IS NOT NULL
-               AND e.rate_limit > 0
                AND e.disabled_at IS NULL
                AND (h.circuit_open_until IS NULL OR h.circuit_open_until <= ?1)
                AND (h.next_allowed_at IS NULL OR h.next_allowed_at <= ?1)
+               AND EXISTS (
+                   SELECT 1 FROM deliveries d
+                   WHERE d.endpoint_id = e.id
+                     AND d.status = 'pending'
+                     AND d.next_at <= ?1
+                     AND (d.lease_until IS NULL OR d.lease_until <= ?1)
+               )
+             ORDER BY e.id
              LIMIT ?2",
         )?;
         let rows = stmt
@@ -172,6 +183,11 @@ fn claim_limited(
         // Spacing rather than a bucket: at `rate_limit` per minute the next
         // one is allowed a minute divided by the limit from now, which makes
         // the rate exact and leaves no burst to absorb.
+        //
+        // The floor of one is not defensive tidiness. The API refuses a limit
+        // of zero, but a row that carries one anyway must still be delivered
+        // to slowly rather than parked for ever: a queue that silently never
+        // drains is the worst of the available behaviours.
         let spacing = (RATE_PERIOD / rate_limit.max(1)).max(1);
         conn.execute(
             "INSERT INTO endpoint_health(endpoint_id, next_allowed_at) VALUES (?1, ?2)

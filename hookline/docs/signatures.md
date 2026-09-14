@@ -72,8 +72,12 @@ curl -X POST   $API/apps/$APP/endpoints/$EP/secrets/rotate -d '{"grace_secs":0}'
 curl -X DELETE $API/apps/$APP/endpoints/$EP/secrets/$LEAKED
 ```
 
-An endpoint can never be left with no active secret; the revoke is refused
-with a `409` rather than leaving it unable to sign anything.
+An endpoint can never be left with no secret that outlives the rotation
+window; the revoke is refused with a `409` rather than leaving it unable to
+sign. That check is about the future, not the present: right after a rotation
+the old secret is still active and the new one is the only permanent one, so
+"something is signing right now" would happily let you revoke the new one and
+leave the endpoint mute the instant the grace period lapsed.
 
 ## Bringing your own secret
 

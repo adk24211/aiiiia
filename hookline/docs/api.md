@@ -75,13 +75,16 @@ route; it is not in any listing.
 
 `event_types` is a list of patterns, or absent for every event. A trailing `*`
 matches a prefix: `invoice.*` covers `invoice.paid`. A star anywhere else is
-refused, because it reads as a wildcard and would not be one.
+refused, because it reads as a wildcard and would not be one. Event types are
+text, not ASCII: `결제.*` and `请求.created` are ordinary patterns.
 
 `event_types` distinguishes absent from null in a `PATCH`: omitting it leaves
 the filter alone, and sending `null` clears it.
 
-`rate_limit` is deliveries per minute to that endpoint, or absent for no limit
-of its own. It is enforced as spacing rather than a bucket — at 60 a minute,
+`rate_limit` is deliveries per minute to that endpoint, at least 1, or absent
+for no limit of its own. Zero is refused: it would park every delivery for
+ever, and stopping delivery to an endpoint is `disable`, which says so in the
+endpoint's own state. It is enforced as spacing rather than a bucket — at 60 a minute,
 one a second — so there is no burst to absorb and the rate is exact. A limited
 endpoint with a backlog does not hold up anyone else's deliveries; its next
 allowed time is in its `health`.

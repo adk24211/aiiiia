@@ -443,3 +443,88 @@ async fn the_admin_ui_can_be_switched_off() {
         .expect("request");
     assert_eq!(response.status(), 404);
 }
+
+#[tokio::test]
+async fn a_non_ascii_event_type_is_handled_rather_than_fatal() {
+    // The validation sliced off the last byte to check for a misplaced
+    // wildcard. A byte slice through the middle of a multi-byte character
+    // panics, so an event type in any non-Latin script took the handler down
+    // instead of answering.
+    let hookline = Harness::start().await;
+    let (_, app) = hookline
+        .post("/v1/apps", serde_json::json!({ "name": "acme" }))
+        .await;
+    let app = app["id"].as_str().unwrap();
+
+    for types in [
+        serde_json::json!(["결제.완료"]),
+        serde_json::json!(["결제.*"]),
+        serde_json::json!(["请求"]),
+        serde_json::json!(["naïve", "café*"]),
+        serde_json::json!(["*"]),
+    ] {
+        let (status, body) = hookline
+            .post(
+                &format!("/v1/apps/{}/endpoints", app),
+                serde_json::json!({ "url": "https://example.com/hook", "event_types": types }),
+            )
+            .await;
+        assert_eq!(status, 200, "{} was not accepted: {:?}", types, body);
+    }
+
+    // And a genuinely misplaced wildcard is still refused, not crashed on.
+    let (status, _) = hookline
+        .post(
+            &format!("/v1/apps/{}/endpoints", app),
+            serde_json::json!({ "url": "https://example.com/hook", "event_types": ["결*제"] }),
+        )
+        .await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn a_rate_limit_of_zero_is_refused() {
+    // Zero would park every delivery to the endpoint for ever. Switching an
+    // endpoint off is a different operation that says so in its own state.
+    let hookline = Harness::start().await;
+    let (_, app) = hookline
+        .post("/v1/apps", serde_json::json!({ "name": "acme" }))
+        .await;
+    let app = app["id"].as_str().unwrap();
+
+    let (status, body) = hookline
+        .post(
+            &format!("/v1/apps/{}/endpoints", app),
+            serde_json::json!({ "url": "https://example.com/hook", "rate_limit": 0 }),
+        )
+        .await;
+    assert_eq!(status, 400, "{:?}", body);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("disable"),
+        "the message should point at the operation they meant: {:?}",
+        body
+    );
+
+    let (status, created) = hookline
+        .post(
+            &format!("/v1/apps/{}/endpoints", app),
+            serde_json::json!({ "url": "https://example.com/hook", "rate_limit": 1 }),
+        )
+        .await;
+    assert_eq!(status, 200, "{:?}", created);
+    let id = created["id"].as_str().unwrap();
+    let (status, patched) = hookline
+        .patch(
+            &format!("/v1/apps/{}/endpoints/{}", app, id),
+            serde_json::json!({ "rate_limit": 0 }),
+        )
+        .await;
+    assert_eq!(
+        status, 400,
+        "a patch must not smuggle it in either: {:?}",
+        patched
+    );
+}

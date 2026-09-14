@@ -346,11 +346,17 @@ pub mod secrets {
     ///
     /// The check runs before the write, not after: a guard that refuses once
     /// the row is already changed has enforced nothing.
+    ///
+    /// What it checks is that a secret with no expiry remains, not merely that
+    /// something is active right now. Right after a rotation the old secret is
+    /// still active and the new one is the only permanent one, so a check on
+    /// the present moment happily revokes the new one — and the endpoint has
+    /// nothing to sign with the instant the grace period lapses.
     pub fn revoke(conn: &Connection, endpoint_id: &str, secret_id: &str, now: i64) -> Result<()> {
         let others: i64 = conn.query_row(
             "SELECT count(*) FROM endpoint_secrets
-             WHERE endpoint_id = ?1 AND id <> ?2 AND (expires_at IS NULL OR expires_at > ?3)",
-            params![endpoint_id, secret_id, now],
+             WHERE endpoint_id = ?1 AND id <> ?2 AND expires_at IS NULL",
+            params![endpoint_id, secret_id],
             |r| r.get(0),
         )?;
         if others == 0 {
