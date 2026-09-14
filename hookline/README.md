@@ -42,6 +42,28 @@ does not answer, and you can see every attempt it took.
 
 ```bash
 cargo build --release
+./examples/demo.sh
+```
+
+That starts hookline and three consumers — one healthy, one that fails twice
+then recovers, one that is simply down — sends an event to all three, and shows
+what each of them did:
+
+```
+4. what happened
+   :9201/hook  succeeded  success 200
+   :9202/hook  succeeded  failure 503 -> failure 503 -> success 200
+   :9203/hook  pending    failure 500 -> failure 500 -> failure 500  CIRCUIT OPEN
+
+the admin UI is at http://127.0.0.1:8080
+```
+
+Everything lives in a scratch directory it deletes on exit.
+
+## Or by hand
+
+```bash
+cargo build --release
 export HOOKLINE_DATABASE=./hookline.db
 
 # Mint a credential. This is the only time the token exists.
